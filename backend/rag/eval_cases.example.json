@@ -1,0 +1,55 @@
+[
+  {
+    "id": "publish_stage_tools",
+    "question": "发布阶段，使用的工具有哪些",
+    "description": "验证标题 + 列表结构在 Context Compression 后不丢失答案项。",
+    "reference": "发布阶段使用的工具包括：内容管理系统（WordPress、Drupal）、社交媒体管理工具（Hootsuite）、邮件营销工具（Mailchimp）。",
+    "expected_keywords": ["WordPress", "Drupal", "Hootsuite", "Mailchimp"],
+    "expected_chunk_keywords": [
+      "发布",
+      "使用工具",
+      "WordPress",
+      "Drupal",
+      "Hootsuite",
+      "Mailchimp"
+    ],
+    "max_expected_rank": 3,
+    "min_context_keyword_hit_rate": 1.0,
+    "min_answer_keyword_hit_rate": 1.0
+  },
+  {
+    "id": "requirement_analysis_tools",
+    "question": "需求分析阶段使用哪些工具",
+    "description": "验证另一个工作流程阶段的工具列表可被找回。",
+    "reference": "需求分析阶段使用的工具包括：项目管理软件（Jira、Trello）、文档编辑器（Google Docs、Notion）、协作工具（Slack、Microsoft Teams）。",
+    "expected_keywords": ["Jira", "Trello", "Google Docs", "Notion", "Slack", "Microsoft Teams"],
+    "expected_chunk_keywords": [
+      "需求分析",
+      "使用工具",
+      "Jira",
+      "Trello",
+      "Google Docs",
+      "Notion"
+    ],
+    "max_expected_rank": 3,
+    "min_context_keyword_hit_rate": 0.8,
+    "min_answer_keyword_hit_rate": 0.8
+  },
+  {
+    "id": "development_stage_tools",
+    "question": "开发阶段有哪些工具",
+    "description": "验证开发阶段的工具列表召回与压缩效果。",
+    "reference": "开发阶段使用的工具包括：内容创作工具（Markdown Editor、Adobe Creative Suite）、版本控制系统（Git）、教育平台（Moodle、Blackboard）。",
+    "expected_keywords": ["Markdown Editor", "Adobe Creative Suite", "Git", "Moodle", "Blackboard"],
+    "expected_chunk_keywords": [
+      "开发",
+      "使用工具",
+      "Markdown Editor",
+      "Adobe Creative Suite",
+      "Git"
+    ],
+    "max_expected_rank": 3,
+    "min_context_keyword_hit_rate": 0.8,
+    "min_answer_keyword_hit_rate": 0.8
+  }
+]
