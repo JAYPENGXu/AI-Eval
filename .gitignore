@@ -2,6 +2,7 @@ backend/db.sqlite3
 backend/media/
 backend/vector_store/
 backend/venv/
+backend/logs/
 backend/**/__pycache__/
 backend/**/*.pyc
 frontend/node_modules/
@@ -9,3 +10,4 @@ frontend/dist/
 frontend/.vite/
 .env
 .logs/
+backend/agent_state/

@@ -1,5 +1,8 @@
 import json
+import logging
+import re
 import threading
+import uuid
 from pathlib import Path
 
 from django.contrib.auth.models import User
@@ -16,6 +19,9 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
+from .agent.services import run_ragops_agent
+from .case_factory import create_regression_case_from_eval_case, create_regression_case_from_trace, create_regression_case_from_user_feedback
+from .experiments import refresh_experiment_plan, start_experiment_plan
 from .chunkers import list_chunk_methods
 from .models import (
     ChatMessage,
@@ -24,10 +30,13 @@ from .models import (
     Document,
     KnowledgeBase,
     ModelCallLog,
+    RagAgentAction,
     RagBenchmarkCase,
     RagEvalCaseResult,
     RagEvalRun,
+    RagExperimentPlan,
     RagTrace,
+    RagUserFeedback,
 )
 from .serializers import (
     ChatMessageSerializer,
@@ -36,17 +45,43 @@ from .serializers import (
     DocumentSerializer,
     KnowledgeBaseSerializer,
     ModelCallLogSerializer,
+    RagAgentActionSerializer,
     RagBenchmarkCaseSerializer,
     RagEvalRunDetailSerializer,
     RagEvalRunListSerializer,
+    RagExperimentPlanSerializer,
     RagTraceDetailSerializer,
     RagTraceListSerializer,
+    RagUserFeedbackSerializer,
     RegisterSerializer,
 )
 from .services import answer_question, index_document, preview_chunks, stream_answer_events
 from .vector_store import get_vector_store
 
 RAGAS_DEFAULT_METRICS = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+
+logger = logging.getLogger(__name__)
+stream_slots = threading.BoundedSemaphore(getattr(settings, "RAG_STREAM_MAX_ACTIVE_PER_PROCESS", 32))
+
+
+AGENT_THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9:_\-.]{1,180}$")
+
+
+def build_agent_thread_business_key(user_id, kb_id, trace_id, eval_run_id, compare_eval_run_id):
+    return (
+        f"u:{user_id}|kb:{kb_id or 'none'}|trace:{trace_id or 'none'}|"
+        f"eval:{eval_run_id or 'none'}|compare:{compare_eval_run_id or 'none'}"
+    )
+
+
+def normalize_agent_thread_id(user_id, business_key, provided):
+    value = str(provided or "").strip()
+    if value:
+        if not AGENT_THREAD_ID_PATTERN.match(value):
+            raise ValueError("thread_id contains unsupported characters.")
+        return value
+    compact_key = business_key.replace("|", ":").replace(":", "_")
+    return f"ragops:{compact_key}:{uuid.uuid4().hex[:12]}"
 
 
 def sse_event(event: str, data: dict | list) -> str:
@@ -129,6 +164,50 @@ def model_usage_summary(request):
     )
 
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def ragops_agent_run(request):
+    message = (request.data.get("message") or "").strip()
+    if not message:
+        return Response({"detail": "message is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def optional_int(name):
+        value = request.data.get(name)
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be an integer.")
+
+    try:
+        kb_id = optional_int("kb")
+        trace_id = optional_int("trace")
+        eval_run_id = optional_int("eval_run")
+        compare_eval_run_id = optional_int("compare_eval_run")
+        thread_business_key = build_agent_thread_business_key(
+            request.user.id,
+            kb_id,
+            trace_id,
+            eval_run_id,
+            compare_eval_run_id,
+        )
+        thread_id = normalize_agent_thread_id(request.user.id, thread_business_key, request.data.get("thread_id"))
+        result = run_ragops_agent(
+            user=request.user,
+            message=message,
+            kb_id=kb_id,
+            trace_id=trace_id,
+            eval_run_id=eval_run_id,
+            compare_eval_run_id=compare_eval_run_id,
+            thread_id=thread_id,
+            thread_business_key=thread_business_key,
+        )
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(result)
+
+
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
@@ -172,7 +251,9 @@ def reset_workspace(request):
         eval_run_count = RagEvalRun.objects.filter(kb__owner=request.user).count()
         eval_case_count = RagEvalCaseResult.objects.filter(run__kb__owner=request.user).count()
         model_call_count = ModelCallLog.objects.filter(owner=request.user).count()
+        agent_action_count = RagAgentAction.objects.filter(owner=request.user).count()
         ModelCallLog.objects.filter(owner=request.user).delete()
+        RagAgentAction.objects.filter(owner=request.user).delete()
         document_count = len(documents)
         kb_count = KnowledgeBase.objects.filter(owner=request.user).count()
         KnowledgeBase.objects.filter(owner=request.user).delete()
@@ -190,6 +271,7 @@ def reset_workspace(request):
                 "rag_eval_runs": eval_run_count,
                 "rag_eval_case_results": eval_case_count,
                 "model_call_logs": model_call_count,
+                "rag_agent_actions": agent_action_count,
                 "uploaded_files": deleted_files,
                 "vector_documents": len(document_ids),
             },
@@ -257,7 +339,11 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
     serializer_class = ChatSessionSerializer
 
     def get_queryset(self):
-        return ChatSession.objects.filter(owner=self.request.user).order_by("-updated_at")
+        queryset = ChatSession.objects.filter(owner=self.request.user)
+        kb_id = self.request.query_params.get("kb")
+        if kb_id:
+            queryset = queryset.filter(kb_id=kb_id)
+        return queryset.order_by("-updated_at")
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
@@ -285,18 +371,34 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
             return Response({"detail": "content is required"}, status=status.HTTP_400_BAD_REQUEST)
         rag_options = request.data.get("rag_options") or {}
 
+        if not stream_slots.acquire(blocking=False):
+            logger.warning("rag stream rejected max_active session=%s user=%s", session.id, request.user.id)
+            return Response({"detail": "当前流式请求较多，请稍后再试"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        logger.info("rag stream slot acquired session=%s user=%s", session.id, request.user.id)
+
         ChatMessage.objects.create(session=session, role="user", content=question)
 
         def event_stream():
             try:
-                for item in stream_answer_events(session, question, rag_options):
-                    yield sse_event(item["event"], item["data"])
-            except Exception as exc:
-                yield sse_event("error", {"detail": str(exc)})
+                yield ": stream-open\n\n"
+                try:
+                    for item in stream_answer_events(session, question, rag_options):
+                        yield sse_event(item["event"], item["data"])
+                except Exception as exc:
+                    logger.exception("rag stream failed session=%s", session.id)
+                    detail = str(exc) or "RAG 问答失败。"
+                    if "Connection error" in detail or "Network is unreachable" in detail or "timed out" in detail:
+                        detail = f"模型或向量服务网络连接失败，无法可靠回答。请检查 TUN/代理/API 网络后重试。原始错误：{detail}"
+                    yield sse_event("error", {"detail": detail})
+            finally:
+                stream_slots.release()
+                close_old_connections()
+                logger.info("rag stream slot released session=%s", session.id)
 
         response = StreamingHttpResponse(event_stream(), content_type="text/event-stream; charset=utf-8")
-        response["Cache-Control"] = "no-cache"
+        response["Cache-Control"] = "no-cache, no-transform"
         response["X-Accel-Buffering"] = "no"
+        response["X-RAG-Stream-Timeout"] = str(getattr(settings, "RAG_STREAM_RESPONSE_TIMEOUT_SECONDS", 3600))
         return response
 
 
@@ -322,6 +424,241 @@ class RagTraceViewSet(viewsets.ReadOnlyModelViewSet):
         if question:
             queryset = queryset.filter(question__icontains=question)
         return queryset
+
+
+class RagUserFeedbackViewSet(viewsets.ModelViewSet):
+    serializer_class = RagUserFeedbackSerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        queryset = (
+            RagUserFeedback.objects.filter(owner=self.request.user)
+            .select_related("kb", "session", "message", "trace", "created_action")
+            .order_by("-created_at", "-id")
+        )
+        kb_id = self.request.query_params.get("kb")
+        rating = self.request.query_params.get("rating")
+        if kb_id:
+            queryset = queryset.filter(kb_id=kb_id)
+        if rating:
+            queryset = queryset.filter(rating=rating)
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        message_id = request.data.get("message")
+        rating = request.data.get("rating")
+        reason = request.data.get("reason") or ""
+        comment = request.data.get("comment") or ""
+        if rating not in {"helpful", "not_helpful"}:
+            return Response({"detail": "rating must be helpful or not_helpful."}, status=status.HTTP_400_BAD_REQUEST)
+        if rating == "not_helpful" and not reason:
+            return Response({"detail": "reason is required for not_helpful feedback."}, status=status.HTTP_400_BAD_REQUEST)
+
+        message = (
+            ChatMessage.objects.filter(id=message_id, session__owner=request.user, role="assistant")
+            .select_related("session", "session__kb")
+            .first()
+        )
+        if not message:
+            return Response({"detail": "Assistant message not found."}, status=status.HTTP_404_NOT_FOUND)
+        trace = getattr(message, "trace", None)
+        failure_signals = []
+        if trace:
+            failure_signals = detect_feedback_failure_signals(trace)
+
+        feedback, _ = RagUserFeedback.objects.update_or_create(
+            owner=request.user,
+            message=message,
+            defaults={
+                "kb": message.session.kb,
+                "session": message.session,
+                "trace": trace,
+                "rating": rating,
+                "reason": reason,
+                "comment": comment,
+                "failure_signals": failure_signals,
+            },
+        )
+        if rating == "not_helpful" and trace:
+            action = create_feedback_action(request.user, feedback, trace, failure_signals)
+            feedback.created_action = action
+            feedback.save(update_fields=["created_action", "updated_at"])
+        elif rating == "helpful" and feedback.created_action_id:
+            feedback.created_action = None
+            feedback.save(update_fields=["created_action", "updated_at"])
+        return Response(RagUserFeedbackSerializer(feedback, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+
+def detect_feedback_failure_signals(trace):
+    from .agent.graph import detect_trace_failure_signals
+
+    payload = {
+        "id": trace.id,
+        "question": trace.question,
+        "rewritten_query": trace.rewritten_query,
+        "answer": trace.message.content if trace.message else "",
+        "vector_results": trace.vector_results,
+        "bm25_results": trace.bm25_results,
+        "hybrid_results": trace.hybrid_results,
+        "rerank_results": trace.rerank_results,
+        "compression_results": trace.compression_results,
+        "compression_stats": trace.compression_stats,
+        "settings": trace.settings,
+    }
+    return detect_trace_failure_signals(payload)
+
+
+def create_feedback_action(user, feedback, trace, failure_signals):
+    if not failure_signals:
+        failure_signals = [
+            {
+                "code": "user_negative_feedback",
+                "label": "用户负反馈",
+                "evidence": f"用户选择了不满意原因：{feedback.reason or '未填写'}。",
+            }
+        ]
+    payload = {
+        "feedback": feedback.id,
+        "trace": trace.id,
+        "reason": feedback.reason,
+        "rating": feedback.rating,
+        "failure_signals": failure_signals,
+    }
+    action, created = RagAgentAction.objects.get_or_create(
+        owner=user,
+        action_uid=f"feedback-{feedback.id}-to-regression",
+        defaults={
+            "kb": feedback.kb,
+            "trace": trace,
+            "action_type": "create_regression_case",
+            "source": "user_feedback",
+            "title": "从用户反馈创建 Regression Case",
+            "description": "用户对该回答给出了负反馈。确认后会将对应 Trace 沉淀到 Regression Set，供后续回归验证。",
+            "confirm_label": "确认创建",
+            "payload": payload,
+            "status": "pending",
+        },
+    )
+    if not created and action.status in {"pending", "failed"}:
+        action.kb = feedback.kb
+        action.trace = trace
+        action.source = "user_feedback"
+        action.title = "从用户反馈创建 Regression Case"
+        action.description = "用户对该回答给出了负反馈。确认后会将对应 Trace 沉淀到 Regression Set，供后续回归验证。"
+        action.confirm_label = "确认创建"
+        action.payload = payload
+        action.status = "pending"
+        action.error_message = ""
+        action.result = {}
+        action.completed_at = None
+        action.save(update_fields=["kb", "trace", "source", "title", "description", "confirm_label", "payload", "status", "error_message", "result", "completed_at", "updated_at"])
+    return action
+
+
+class RagAgentActionViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RagAgentActionSerializer
+
+    def get_queryset(self):
+        queryset = (
+            RagAgentAction.objects.filter(owner=self.request.user)
+            .select_related("kb", "trace", "eval_run", "eval_case_result", "created_case")
+            .order_by("-created_at", "-id")
+        )
+        kb_id = self.request.query_params.get("kb")
+        status_value = self.request.query_params.get("status")
+        if kb_id:
+            queryset = queryset.filter(kb_id=kb_id)
+        if status_value:
+            queryset = queryset.filter(status=status_value)
+        return queryset
+
+    @action(detail=True, methods=["post"], url_path="confirm")
+    def confirm(self, request, pk=None):
+        action_obj = self.get_object()
+        if action_obj.status == "completed":
+            return Response(RagAgentActionSerializer(action_obj).data)
+        if action_obj.status == "rejected":
+            return Response({"detail": "Rejected actions cannot be confirmed."}, status=status.HTTP_400_BAD_REQUEST)
+
+        action_obj.confirmed_at = timezone.now()
+        action_obj.status = "pending"
+        action_obj.error_message = ""
+        action_obj.save(update_fields=["confirmed_at", "status", "error_message", "updated_at"])
+
+        try:
+            if action_obj.action_type == "run_experiment_plan":
+                plan_id = action_obj.payload.get("experiment_plan")
+                plan = start_experiment_plan(user=request.user, plan_id=int(plan_id))
+                action_obj.status = "completed"
+                action_obj.completed_at = timezone.now()
+                action_obj.result = {"plan_id": plan.id, "status": plan.status, "variant_count": plan.variants.count()}
+                action_obj.error_message = ""
+                action_obj.save(update_fields=["status", "completed_at", "result", "error_message", "updated_at"])
+                return Response(RagAgentActionSerializer(action_obj).data)
+
+            if action_obj.action_type != "create_regression_case":
+                raise ValueError(f"Unsupported action type: {action_obj.action_type}")
+            if action_obj.source == "trace":
+                trace_id = action_obj.payload.get("trace") or action_obj.trace_id
+                result = create_regression_case_from_trace(user=request.user, trace_id=int(trace_id), payload=action_obj.payload)
+            elif action_obj.source == "eval_failure":
+                eval_case_id = action_obj.payload.get("eval_case") or action_obj.eval_case_result_id
+                result = create_regression_case_from_eval_case(user=request.user, eval_case_result_id=int(eval_case_id), payload=action_obj.payload)
+            elif action_obj.source == "user_feedback":
+                feedback_id = action_obj.payload.get("feedback")
+                result = create_regression_case_from_user_feedback(user=request.user, feedback_id=int(feedback_id), payload=action_obj.payload)
+            else:
+                raise ValueError(f"Unsupported action source: {action_obj.source}")
+
+            action_obj.status = "completed"
+            action_obj.created_case = result.case
+            action_obj.completed_at = timezone.now()
+            action_obj.result = {"created": result.created, "case_id": result.case.case_id, "case_pk": result.case.id}
+            action_obj.error_message = ""
+            action_obj.save(update_fields=["status", "created_case", "completed_at", "result", "error_message", "updated_at"])
+        except Exception as exc:
+            action_obj.status = "failed"
+            action_obj.error_message = str(exc)
+            action_obj.completed_at = timezone.now()
+            action_obj.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
+            return Response(RagAgentActionSerializer(action_obj).data, status=status.HTTP_400_BAD_REQUEST)
+        return Response(RagAgentActionSerializer(action_obj).data)
+
+    @action(detail=True, methods=["post"], url_path="reject")
+    def reject(self, request, pk=None):
+        action_obj = self.get_object()
+        if action_obj.status == "completed":
+            return Response({"detail": "Completed actions cannot be rejected."}, status=status.HTTP_400_BAD_REQUEST)
+        action_obj.status = "rejected"
+        action_obj.rejected_reason = request.data.get("reason") or ""
+        action_obj.completed_at = timezone.now()
+        action_obj.save(update_fields=["status", "rejected_reason", "completed_at", "updated_at"])
+        return Response(RagAgentActionSerializer(action_obj).data)
+
+
+class RagExperimentPlanViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RagExperimentPlanSerializer
+
+    def get_queryset(self):
+        queryset = (
+            RagExperimentPlan.objects.filter(owner=self.request.user)
+            .select_related("kb", "baseline_run", "winner_variant")
+            .prefetch_related("variants__eval_run__case_results")
+            .order_by("-created_at", "-id")
+        )
+        kb_id = self.request.query_params.get("kb")
+        status_value = self.request.query_params.get("status")
+        if kb_id:
+            queryset = queryset.filter(kb_id=kb_id)
+        if status_value:
+            queryset = queryset.filter(status=status_value)
+        return queryset
+
+    def retrieve(self, request, *args, **kwargs):
+        plan = self.get_object()
+        if plan.status == "running":
+            plan = refresh_experiment_plan(plan)
+        return Response(self.get_serializer(plan).data)
 
 
 class RagBenchmarkCaseViewSet(viewsets.ModelViewSet):
@@ -363,96 +700,26 @@ class RagBenchmarkCaseViewSet(viewsets.ModelViewSet):
         trace_id = request.data.get("trace") or request.data.get("trace_id")
         if not trace_id:
             return Response({"detail": "trace is required"}, status=status.HTTP_400_BAD_REQUEST)
-        trace = (
-            RagTrace.objects.filter(id=trace_id, session__owner=request.user)
-            .select_related("session", "session__kb", "message")
-            .first()
-        )
-        if not trace:
-            return Response({"detail": "Trace not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        case_id = request.data.get("case_id") or f"trace_{trace.id}"
-        trace_answer = trace.message.content if trace.message else ""
-        reference = request.data.get("reference") or trace_answer or "TODO: ???????"
-        defaults = {
-            "question": trace.question,
-            "reference": reference,
-            "tags": request.data.get("tags") or ["trace", "regression"],
-            "expected_terms": request.data.get("expected_terms") or [],
-            "target_chunk_ids": request.data.get("target_chunk_ids") or [],
-            "suite": request.data.get("suite") or "regression",
-            "source": "trace",
-            "notes": request.data.get("notes") or f"Created from Trace #{trace.id}. Please review reference and target chunks.",
-            "difficulty": request.data.get("difficulty") or "medium",
-            "enabled": request.data.get("enabled", False),
-            "metadata": {
-                "trace_id": trace.id,
-                "session_id": trace.session_id,
-                "message_id": trace.message_id,
-                "created_from": "trace",
-            },
-        }
-        case, created = RagBenchmarkCase.objects.update_or_create(
-            kb=trace.session.kb,
-            case_id=case_id,
-            defaults=defaults,
-        )
-        return Response({"created": created, "case": RagBenchmarkCaseSerializer(case).data})
+        try:
+            result = create_regression_case_from_trace(user=request.user, trace_id=int(trace_id), payload=request.data)
+        except (TypeError, ValueError) as exc:
+            message = str(exc)
+            response_status = status.HTTP_404_NOT_FOUND if "not found" in message.lower() else status.HTTP_400_BAD_REQUEST
+            return Response({"detail": message}, status=response_status)
+        return Response({"created": result.created, "case": RagBenchmarkCaseSerializer(result.case).data})
 
     @action(detail=False, methods=["post"], url_path="from-eval-case")
     def from_eval_case(self, request):
         result_id = request.data.get("eval_case") or request.data.get("eval_case_id")
         if not result_id:
             return Response({"detail": "eval_case is required"}, status=status.HTTP_400_BAD_REQUEST)
-        result = (
-            RagEvalCaseResult.objects.filter(id=result_id, run__kb__owner=request.user)
-            .select_related("run", "run__kb")
-            .first()
-        )
-        if not result:
-            return Response({"detail": "Eval case result not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        diagnostics = result.diagnostics or {}
-        stages = diagnostics.get("stages") or {}
-        failed_stages = [key for key, value in stages.items() if not value.get("hit")]
-        final_answer = diagnostics.get("final_answer") or {}
-        if final_answer and not final_answer.get("correct"):
-            failed_stages.append("final_answer")
-
-        expected_terms = diagnostics.get("expected_terms") or diagnostics.get("reference_terms") or []
-        target_chunk_ids = diagnostics.get("target_chunk_ids") or []
-        if not target_chunk_ids:
-            for value in stages.values():
-                target_chunk_ids = value.get("target_chunk_ids") or []
-                if target_chunk_ids:
-                    break
-
-        raw_case_id = result.case_id or f"eval_case_{result.id}"
-        case_id = request.data.get("case_id") or f"regression_{raw_case_id}"
-        defaults = {
-            "question": result.question,
-            "reference": result.reference or "TODO: ???????",
-            "tags": request.data.get("tags") or ["eval_failure", "regression"],
-            "expected_terms": request.data.get("expected_terms") or expected_terms,
-            "target_chunk_ids": request.data.get("target_chunk_ids") or target_chunk_ids,
-            "suite": request.data.get("suite") or "regression",
-            "source": "eval_failure",
-            "notes": request.data.get("notes") or f"Created from Eval Run #{result.run_id}, case {result.case_id}. Failed stages: {', '.join(failed_stages) or 'unknown'}.",
-            "difficulty": request.data.get("difficulty") or "medium",
-            "enabled": request.data.get("enabled", True),
-            "metadata": {
-                "eval_run_id": result.run_id,
-                "eval_case_result_id": result.id,
-                "failed_stages": failed_stages,
-                "created_from": "eval_failure",
-            },
-        }
-        case, created = RagBenchmarkCase.objects.update_or_create(
-            kb=result.run.kb,
-            case_id=case_id,
-            defaults=defaults,
-        )
-        return Response({"created": created, "case": RagBenchmarkCaseSerializer(case).data})
+        try:
+            result = create_regression_case_from_eval_case(user=request.user, eval_case_result_id=int(result_id), payload=request.data)
+        except (TypeError, ValueError) as exc:
+            message = str(exc)
+            response_status = status.HTTP_404_NOT_FOUND if "not found" in message.lower() else status.HTTP_400_BAD_REQUEST
+            return Response({"detail": message}, status=response_status)
+        return Response({"created": result.created, "case": RagBenchmarkCaseSerializer(result.case).data})
 
     @action(detail=False, methods=["post"], url_path="import-defaults")
     def import_defaults(self, request):
@@ -476,10 +743,14 @@ class RagBenchmarkCaseViewSet(viewsets.ModelViewSet):
             defaults = {
                 "question": item.get("question", ""),
                 "reference": item.get("reference") or item.get("ground_truth") or item.get("expected_answer") or "",
+                "case_type": item.get("case_type") or "expert",
                 "tags": item.get("tags") or ["default"],
                 "expected_terms": item.get("expected_terms") or item.get("expected_keywords") or [],
                 "target_chunk_ids": item.get("target_chunk_ids") or [],
                 "suite": item.get("suite") or "benchmark",
+                "deterministic_checks": item.get("deterministic_checks") or {},
+                "rubric": item.get("rubric") or {},
+                "thresholds": item.get("thresholds") or {},
                 "source": item.get("source") or "default_json",
                 "notes": item.get("notes") or item.get("description", ""),
                 "difficulty": item.get("difficulty") or "medium",
@@ -567,8 +838,20 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
             except (TypeError, ValueError):
                 return Response({"detail": "limit must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
 
+        baseline_run = None
+        baseline_run_id = request.data.get("baseline_run") or rag_options.get("baseline_run")
+        if baseline_run_id:
+            try:
+                baseline_run_id = int(baseline_run_id)
+            except (TypeError, ValueError):
+                return Response({"detail": "baseline_run must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+            baseline_run = RagEvalRun.objects.filter(id=baseline_run_id, kb=kb).first()
+            if not baseline_run:
+                return Response({"detail": "Baseline run not found in this knowledge base."}, status=status.HTTP_404_NOT_FOUND)
+
         eval_run = RagEvalRun.objects.create(
             kb=kb,
+            baseline_run=baseline_run,
             status="running",
             metrics=RAGAS_DEFAULT_METRICS,
             settings={

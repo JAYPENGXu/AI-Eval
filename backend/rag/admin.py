@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import ChatMessage, ChatSession, Chunk, Document, KnowledgeBase, ModelCallLog
+from .models import ChatMessage, ChatSession, ChatSessionSummary, Chunk, Document, KnowledgeBase, ModelCallLog
 
 
 @admin.register(KnowledgeBase)
@@ -25,6 +25,13 @@ class ChunkAdmin(admin.ModelAdmin):
 admin.site.register(ChatSession)
 admin.site.register(ChatMessage)
 
+
+@admin.register(ChatSessionSummary)
+class ChatSessionSummaryAdmin(admin.ModelAdmin):
+    list_display = ("id", "session", "summary_message_count", "status", "token_estimate", "updated_at")
+    list_filter = ("status",)
+    search_fields = ("session__title", "summary", "error_message")
+    readonly_fields = ("created_at", "updated_at", "last_started_at")
 
 
 @admin.register(ModelCallLog)

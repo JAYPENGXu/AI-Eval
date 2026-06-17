@@ -17,3 +17,6 @@ langchain>=0.2.16,<0.3
 langchain-core>=0.2.38,<0.3
 langchain-community>=0.2.16,<0.3
 langchain-openai>=0.1.20,<0.2
+langgraph>=0.2.0,<0.3
+langgraph-checkpoint-sqlite>=2.0.0,<3.0
+gunicorn>=22.0,<24.0

@@ -1,0 +1,53 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - backend/.env
+    environment:
+      DEBUG: "false"
+      ALLOWED_HOSTS: "localhost,127.0.0.1,backend"
+      CORS_ALLOWED_ORIGINS: "http://localhost,http://127.0.0.1"
+      SQLITE_DB_PATH: "/app/db_data/db.sqlite3"
+      MILVUS_URI: "/app/vector_store/milvus_lite.db"
+      LANGGRAPH_CHECKPOINT_DB: "/app/agent_state/langgraph_checkpoints.sqlite3"
+      RAG_STREAM_MAX_ACTIVE_PER_PROCESS: "32"
+      GUNICORN_WORKERS: "2"
+      GUNICORN_THREADS: "8"
+      GUNICORN_TIMEOUT: "3600"
+    volumes:
+      - backend_db:/app/db_data
+      - backend_media:/app/media
+      - backend_static:/app/staticfiles
+      - backend_vector_store:/app/vector_store
+      - backend_agent_state:/app/agent_state
+    ports:
+      - "8010:8000"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE: "/api"
+    depends_on:
+      - backend
+    volumes:
+      - backend_media:/usr/share/nginx/media:ro
+      - backend_static:/usr/share/nginx/django-static:ro
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  backend_db:
+  backend_media:
+  backend_static:
+  backend_vector_store:
+  backend_agent_state:

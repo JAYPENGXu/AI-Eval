@@ -1,75 +1,28 @@
 <template>
   <main>
-    <section v-if="!store.access" class="auth">
-      <div>
-        <h1>AIAssistant</h1>
-        <p>上传文档，比较五种切片方式，然后基于知识库提问。</p>
-      </div>
-      <form @submit.prevent="login">
-        <input v-model="auth.username" placeholder="用户名" autocomplete="username" />
-        <input v-model="auth.password" placeholder="密码" type="password" autocomplete="current-password" />
-        <button type="submit">登录</button>
-        <button type="button" class="ghost" @click="register">注册</button>
-        <span class="error">{{ error }}</span>
-      </form>
-    </section>
+    <AuthManager :bootstrap="bootstrap" v-slot="{ user, logout }">
+    <el-container class="shell">
+      <AppSidebar
+        :username="user?.username"
+        :kbs="kbs"
+        :documents="filteredDocuments"
+        :selected-kb="selectedKb"
+        :selected-document="selectedDocument"
+        :kb-form="kbForm"
+        :busy="busy"
+        @create-kb="createKb"
+        @select-kb="selectKb"
+        @select-document="selectDocument"
+        @upload="upload"
+        @reset-workspace="resetWorkspace"
+        @logout="logout"
+      />
 
-    <section v-else class="shell">
-      <aside>
-        <div class="brand">
-          <h2>AIAssistant</h2>
-          <span>{{ store.user?.username }}</span>
-        </div>
-
-        <div class="panel">
-          <h3>知识库</h3>
-          <div class="inline">
-            <input v-model="kbForm.name" placeholder="知识库名称" />
-            <button type="button" @click="createKb">新建</button>
-          </div>
-          <button
-            v-for="kb in kbs"
-            :key="kb.id"
-            class="list-item"
-            :class="{ active: selectedKb?.id === kb.id }"
-            @click="selectKb(kb)"
-          >
-            {{ kb.name }}
-          </button>
-        </div>
-
-        <div class="panel">
-          <h3>文档</h3>
-          <input type="file" @change="upload" />
-          <button
-            v-for="doc in filteredDocuments"
-            :key="doc.id"
-            class="list-item"
-            :class="{ active: selectedDocument?.id === doc.id }"
-            @click="selectDocument(doc)"
-          >
-            <strong>{{ doc.filename }}</strong>
-            <small>{{ doc.status }} · {{ doc.chunk_method }}</small>
-          </button>
-        </div>
-
-        <button type="button" class="danger" :disabled="busy.reset" @click="resetWorkspace">
-
-
-          {{ busy.reset ? '重置中' : '一键重置' }}
-
-
-        </button>
-
-
-        <button type="button" class="ghost" @click="logout">退出</button>
-      </aside>
-
-      <section class="workspace">
+      <el-main class="workspace">
         <header>
           <div>
-            <h1>调试工作台</h1>
-            <p>先预览切片，再索引入库，最后在右侧对话栏提问。</p>
+            <h1>RAGOps 工作台</h1>
+            <p>从切片、检索到评测与修复，追踪每一次知识库回答的效果。</p>
           </div>
           <div class="status">{{ selectedKb?.name || '未选择知识库' }}</div>
         </header>
@@ -81,716 +34,158 @@
           :style="{ '--lab-width': `${labWidthPercent}%` }"
         >
           <section class="card lab">
-            <div class="workbench-tabs" role="tablist" aria-label="RAG workbench">
-              <button
-                v-for="tab in workbenchTabs"
-                :key="tab.key"
-                type="button"
-                role="tab"
-                :aria-selected="activeWorkbenchTab === tab.key"
-                :class="{ active: activeWorkbenchTab === tab.key }"
-                @click="activeWorkbenchTab = tab.key"
-              >
-                <strong>{{ tab.label }}</strong>
-                <small>{{ tab.caption }}</small>
-              </button>
-            </div>
-            <div class="workbench-context">
-              <span>KB: {{ selectedKb?.name || '-' }}</span>
-              <span>Docs: {{ filteredDocuments.length }}</span>
-              <span>Chunks: {{ stats.chunk_count || selectedDocument?.chunk_count || 0 }}</span>
-              <span>Eval Runs: {{ evalRuns.length }}</span>
-              <span>Model Calls: {{ modelUsage?.totals?.call_count || 0 }}</span>
-            </div>
-            <details v-show="activeWorkbenchTab === 'debug'" class="debug-section" open>
-              <summary><span>切片实验室</span><small>文档切片、预览与索引</small></summary>
-              <div class="debug-section-body">
-            <div class="toolbar">
-              <label>
-                切片方式
-                <select v-model="chunkForm.chunk_method" @change="preview">
-                  <option v-for="method in chunkMethods" :key="method.value" :value="method.value">
-                    {{ method.label }}
-                  </option>
-                </select>
-              </label>
-              <label>
-                chunk size
-                <input v-model.number="chunkForm.options.chunk_size" type="number" min="100" />
-              </label>
-              <label>
-                overlap
-                <input v-model.number="chunkForm.options.chunk_overlap" type="number" min="0" />
-              </label>
-              <label>
-                window
-                <input v-model.number="chunkForm.options.window_size" type="number" min="1" />
-              </label>
-              <button type="button" @click="preview" :disabled="!selectedDocument || busy.preview">预览</button>
-              <button type="button" @click="indexDoc" :disabled="!selectedDocument || busy.index">
-                {{ busy.index ? '索引中' : '索引' }}
-              </button>
-            </div>
+            <WorkbenchTabs
+              v-model:active-tab="activeWorkbenchTab"
+              :tabs="workbenchTabs"
+              :selected-kb="selectedKb"
+              :document-count="filteredDocuments.length"
+              :chunk-count="stats.chunk_count || selectedDocument?.chunk_count || 0"
+              :eval-run-count="evalRuns.length"
+              :model-call-count="modelUsage?.totals?.call_count || 0"
+            />
+            <ChunkLabPanel
+              v-model:collapse-value="activeCollapseSections.chunkLab"
+              :active="activeWorkbenchTab === 'debug'"
+              :chunk-form="chunkForm"
+              :chunk-methods="chunkMethods"
+              :selected-document="selectedDocument"
+              :busy="busy"
+              :notice="notice"
+              :action-error="actionError"
+              :stats="stats"
+              :chunks="chunks"
+              @preview="preview"
+              @index-document="indexDoc"
+            />
 
-            <p v-if="notice" class="notice">{{ notice }}</p>
-            <p v-if="actionError" class="error">{{ actionError }}</p>
-
-            <div class="metrics">
-              <span>Chunks: {{ stats.chunk_count || 0 }}</span>
-              <span>Avg Tokens: {{ stats.avg_tokens || 0 }}</span>
-              <span>Max Tokens: {{ stats.max_tokens || 0 }}</span>
-            </div>
-
-            <div class="chunks">
-              <article v-for="chunk in chunks" :key="chunk.index" class="chunk">
-                <div class="chunk-head">
-                  <strong>#{{ chunk.index + 1 }}</strong>
-                  <span>{{ chunk.token_count }} tokens</span>
-                </div>
-                <p>{{ chunk.content }}</p>
-              </article>
-            </div>
-
-              </div>
-            </details>
-
-            <details v-show="activeWorkbenchTab === 'debug'" class="debug-section" open>
-              <summary><span>RAG 检索调试</span><small>向量召回、上下文与最终 Prompt</small></summary>
-              <div class="debug-section-body">
-            <div class="trace-panel">
-              <div class="trace-title">
-                <h3>RAG 检索调试</h3>
-                <span v-if="latestTrace">Trace #{{ latestTrace.id }}</span>
-              </div>
-              <div class="rag-options">
-                <label>
-                  Query Rewrite
-                  <select v-model="ragOptions.query_rewrite_strategy">
-                    <option v-for="option in queryRewriteStrategies" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  Vector top_k
-                  <input v-model.number="ragOptions.top_k" type="number" min="1" max="20" />
-                </label>
-                <label>
-                  BM25 top_k
-                  <input v-model.number="ragOptions.bm25_top_k" type="number" min="1" max="20" />
-                </label>
-                <label>
-                  RRF_K
-                  <input v-model.number="ragOptions.rrf_k" type="number" min="1" max="500" />
-                </label>
-                <label>
-                  Rerank top_n
-                  <input v-model.number="ragOptions.rerank_top_n" type="number" min="1" max="20" />
-                </label>
-                <label>
-                  Context Compression
-                  <select v-model="ragOptions.compression_strategy">
-                    <option v-for="option in compressionStrategies" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-                <span>{{ currentRewriteDescription }} · {{ currentCompressionDescription }}</span>
-              </div>
-              <div v-if="!latestTrace" class="empty-state">发送一个问题后，这里会展示本次向量召回、上下文和最终 Prompt。</div>
-              <template v-else>
-                <div class="trace-summary">
-                  <span>模式：{{ latestTrace.retrieval_mode }}</span>
-                  <span>Top K：{{ latestTrace.settings?.rag_top_k }}</span>
-                  <span>向量库：{{ latestTrace.settings?.vector_store }}</span>
-                  <span>Embedding：{{ latestTrace.settings?.embedding_model }}</span>
-                  <span>BM25 Top K：{{ latestTrace.settings?.bm25_top_k }}</span>
-                  <span>BM25 k1/b：{{ latestTrace.settings?.bm25_k1 }} / {{ latestTrace.settings?.bm25_b }}</span>
-                  <span>Hybrid Top K：{{ latestTrace.settings?.hybrid_top_k }}</span>
-                  <span>RRF k：{{ latestTrace.settings?.rrf_k }}</span>
-                  <span>Rerank：{{ latestTrace.settings?.rerank_model }}</span>
-                  <span>Rerank Top N：{{ latestTrace.settings?.rerank_top_n }}</span>
-                  <span>Compression：{{ latestTrace.settings?.context_compression_strategy }}</span>
-                  <span>节省：{{ formatPercent(latestTrace.compression_stats?.saving_ratio) }}</span>
-                </div>
-
-                <section class="trace-section">
-                  <h3>Query Rewrite</h3>
-                  <div class="query-rewrite-box">
-                    <div>
-                      <h4>Original Query</h4>
-                      <p>{{ latestTrace.question }}</p>
-                    </div>
-                    <div>
-                      <h4>Rewritten Query</h4>
-                      <p>{{ latestTrace.rewritten_query || latestTrace.question }}</p>
-                    </div>
-                  </div>
-                </section>
-
-                <section class="trace-section">
-                  <h3>BM25 Search</h3>
-                  <div v-if="!latestTrace.bm25_results?.length" class="empty-state">没有关键词召回结果。</div>
-                  <article v-for="item in latestTrace.bm25_results" :key="item.chunk_id" class="trace-item">
-                    <div class="trace-item-head">
-                      <strong>#{{ item.rank }} · {{ item.document }}</strong>
-                      <span>{{ item.engine }} · {{ formatScore(item.score) }}</span>
-                    </div>
-                    <div v-if="item.matched_terms?.length" class="matched-terms">
-                      <span v-for="term in item.matched_terms" :key="term">{{ term }}</span>
-                    </div>
-                    <p>{{ item.content }}</p>
-                  </article>
-                </section>
-
-                <section class="trace-section">
-                  <h3>Hybrid Fusion (RRF)</h3>
-                  <div v-if="!latestTrace.hybrid_results?.length" class="empty-state">没有融合结果。</div>
-                  <article v-for="item in latestTrace.hybrid_results" :key="item.chunk_id" class="trace-item">
-                    <div class="trace-item-head">
-                      <strong>#{{ item.rank }} · {{ item.document }}</strong>
-                      <span>{{ item.engine }} · {{ formatScore(item.rrf_score || item.score) }}</span>
-                    </div>
-                    <div class="matched-terms">
-                      <span v-if="item.sources?.bm25">BM25 #{{ item.sources.bm25.rank }}</span>
-                      <span v-if="item.sources?.vector">Vector #{{ item.sources.vector.rank }}</span>
-                    </div>
-                    <p>{{ item.content }}</p>
-                  </article>
-                </section>
-
-                <section class="trace-section">
-                  <h3>Rerank</h3>
-                  <div v-if="!latestTrace.rerank_results?.length" class="empty-state">没有 Rerank 结果。</div>
-                  <article v-for="item in latestTrace.rerank_results" :key="item.chunk_id" class="trace-item">
-                    <div class="trace-item-head">
-                      <strong>#{{ item.rank }} · {{ item.document }}</strong>
-                      <span>{{ item.engine }} · {{ formatScore(item.rerank_score || item.score) }}</span>
-                    </div>
-                    <div class="matched-terms">
-                      <span>Before #{{ item.pre_rerank_rank }}</span>
-                      <span v-if="item.sources?.bm25">BM25 #{{ item.sources.bm25.rank }}</span>
-                      <span v-if="item.sources?.vector">Vector #{{ item.sources.vector.rank }}</span>
-                    </div>
-                    <p>{{ item.content }}</p>
-                  </article>
-                </section>
-
-                <section class="trace-section">
-                  <h3>Vector Search</h3>
-                  <article v-for="item in latestTrace.vector_results" :key="item.chunk_id" class="trace-item">
-                    <div class="trace-item-head">
-                      <strong>#{{ item.rank }} · {{ item.document }}</strong>
-                      <span>{{ item.engine }} · {{ formatScore(item.score) }}</span>
-                    </div>
-                    <p>{{ item.content }}</p>
-                  </article>
-                </section>
-
-                <section class="trace-section compression-section">
-                  <h3>Context Compression</h3>
-                  <div class="trace-summary">
-                    <span>压缩前：{{ latestTrace.compression_stats?.original_tokens || 0 }} tokens</span>
-                    <span>压缩后：{{ latestTrace.compression_stats?.compressed_tokens || 0 }} tokens</span>
-                    <span>节省：{{ latestTrace.compression_stats?.saved_tokens || 0 }} tokens</span>
-                    <span>比例：{{ formatPercent(latestTrace.compression_stats?.saving_ratio) }}</span>
-                  </div>
-                  <article v-for="item in latestTrace.compression_results" :key="item.chunk_id" class="trace-item">
-                    <div class="trace-item-head">
-                      <strong>#{{ item.rank }} · {{ item.document }}</strong>
-                      <span>{{ item.original_tokens }} → {{ item.compressed_tokens }} tokens</span>
-                    </div>
-                    <div class="compression-columns">
-                      <div>
-                        <h4>压缩前</h4>
-                        <p>{{ item.original_content }}</p>
-                      </div>
-                      <div>
-                        <h4>压缩后</h4>
-                        <p>{{ item.content }}</p>
-                      </div>
-                    </div>
-                    <details class="sentence-details">
-                      <summary>保留 / 删除句子</summary>
-                      <div class="matched-terms">
-                        <span v-for="sentence in item.kept_sentences" :key="sentence">保留：{{ sentence }}</span>
-                      </div>
-                      <div class="removed-sentences">
-                        <p v-for="sentence in item.removed_sentences" :key="sentence">删除：{{ sentence }}</p>
-                      </div>
-                    </details>
-                  </article>
-                </section>
-
-                <section class="trace-section">
-                  <h3>Context</h3>
-                  <pre>{{ latestTrace.compressed_context }}</pre>
-                </section>
-
-                <section class="trace-section">
-                  <h3>Final Prompt</h3>
-                  <pre>{{ latestTrace.final_prompt }}</pre>
-                </section>
-              </template>
-            </div>
-              </div>
-            </details>
+            <RagDebugPanel
+              v-model:collapse-value="activeCollapseSections.ragDebug"
+              :active="activeWorkbenchTab === 'debug'"
+              :latest-trace="latestTrace"
+              :rag-options="ragOptions"
+              :query-rewrite-strategies="queryRewriteStrategies"
+              :compression-strategies="compressionStrategies"
+              :current-rewrite-description="currentRewriteDescription"
+              :current-compression-description="currentCompressionDescription"
+              :format-score="formatScore"
+              :format-percent="formatPercent"
+            />
 
 
-            <details v-show="activeWorkbenchTab === 'costs'" class="debug-section" open>
-              <summary><span>模型与成本监控</span><small>Token、成本、慢请求、失败请求与 Trace 成本</small></summary>
-              <div class="debug-section-body">
-                <div class="trace-history-toolbar">
-                  <button type="button" @click="loadModelUsage" :disabled="!selectedKb">刷新</button>
-                  <span>当前知识库：{{ selectedKb?.name || '-' }}</span>
-                </div>
-                <div v-if="!modelUsage" class="empty-state">暂无模型调用记录。完成一次索引或问答后，这里会展示模型调用、Token 与成本。</div>
-                <template v-else>
-                  <div class="cost-metrics">
-                    <div><strong>{{ modelUsage.totals.call_count }}</strong><span>总调用次数</span></div>
-                    <div><strong>{{ modelUsage.totals.total_tokens }}</strong><span>总 Token</span></div>
-                    <div><strong>{{ formatCost(modelUsage.totals.estimated_cost) }}</strong><span>总成本</span></div>
-                    <div><strong>{{ modelUsage.totals.avg_latency_ms }} ms</strong><span>平均延迟</span></div>
-                    <div><strong>{{ modelUsage.totals.slow_count }}</strong><span>慢请求</span></div>
-                    <div><strong>{{ modelUsage.totals.failed_count }}</strong><span>失败请求</span></div>
-                  </div>
 
-                  <section class="trace-section">
-                    <h3>各模型成本占比</h3>
-                    <div v-if="!modelUsage.by_model?.length" class="empty-state">暂无模型调用。</div>
-                    <div v-else class="cost-table">
-                      <div class="cost-row head"><strong>模型</strong><span>类型</span><span>调用</span><span>Token</span><span>成本</span><span>占比</span></div>
-                      <div v-for="item in modelUsage.by_model" :key="`${item.model}-${item.call_type}`" class="cost-row">
-                        <strong>{{ item.model }}</strong>
-                        <span>{{ item.call_type }}</span>
-                        <span>{{ item.call_count }}</span>
-                        <span>{{ item.total_tokens || 0 }}</span>
-                        <span>{{ formatCost(item.estimated_cost) }}</span>
-                        <span>{{ formatCostShare(item.estimated_cost, modelUsage.totals.estimated_cost) }}</span>
-                      </div>
-                    </div>
-                  </section>
+            <AgentPanel
+              v-model:collapse-value="activeCollapseSections.agent"
+              :active="activeWorkbenchTab === 'agent'"
+              :selected-kb="selectedKb"
+              :agent-form="agentForm"
+              :trace-history="traceHistory"
+              :eval-runs="evalRuns"
+              :busy="busy"
+              :agent-result="agentResult"
+              :agent-actions="agentActions"
+              :active-experiment-plan="activeExperimentPlan"
+              :agent-thread-id="currentAgentThreadId"
+              :compact-text="compactText"
+              :format-date="formatDate"
+              :has-diagnosis="hasDiagnosis"
+              :diagnosis-severity-class="diagnosisSeverityClass"
+              :diagnosis-severity-text="diagnosisSeverityText"
+              :action-failure-signals="actionFailureSignals"
+              :action-card-meta="actionCardMeta"
+              :is-agent-card-done="isAgentCardDone"
+              :display-action-title="displayActionTitle"
+              :action-status-text="actionStatusText"
+              @run-agent="runAgent"
+              @confirm-action="confirmAgentAction"
+              @refresh-experiment-plan="refreshExperimentPlan"
+              @new-agent-thread="resetAgentThread"
+            />
 
-                  <section class="trace-section">
-                    <h3>单次 Trace 成本</h3>
-                    <div v-if="!modelUsage.trace_costs?.length" class="empty-state">暂无已关联 Trace 的模型调用。</div>
-                    <div v-else class="cost-table">
-                      <div class="cost-row head"><strong>Trace</strong><span>调用</span><span>Token</span><span>成本</span><span>问题</span></div>
-                      <div v-for="item in modelUsage.trace_costs" :key="item.trace" class="cost-row trace-cost">
-                        <strong>#{{ item.trace }}</strong>
-                        <span>{{ item.call_count }}</span>
-                        <span>{{ item.total_tokens || 0 }}</span>
-                        <span>{{ formatCost(item.estimated_cost) }}</span>
-                        <span>{{ compactText(item.trace__question, 56) }}</span>
-                      </div>
-                    </div>
-                  </section>
+            <CostsPanel
+              v-model:collapse-value="activeCollapseSections.costs"
+              :active="activeWorkbenchTab === 'costs'"
+              :selected-kb="selectedKb"
+              :model-usage="modelUsage"
+              :format-cost="formatCost"
+              :format-cost-share="formatCostShare"
+              :format-date="formatDate"
+              :compact-text="compactText"
+              @refresh="loadModelUsage"
+            />
 
-                  <section class="trace-section">
-                    <h3>慢请求</h3>
-                    <div v-if="!modelUsage.slow_calls?.length" class="empty-state">暂无超过 {{ modelUsage.totals.slow_threshold_ms }} ms 的慢请求。</div>
-                    <article v-for="item in modelUsage.slow_calls" :key="`slow-${item.id}`" class="trace-item">
-                      <div class="trace-item-head">
-                        <strong>{{ item.model }} · {{ item.call_type }}</strong>
-                        <span>{{ item.latency_ms }} ms · {{ formatDate(item.created_at) }}</span>
-                      </div>
-                      <p>Token: {{ item.total_tokens }} · Cost: {{ formatCost(item.estimated_cost) }} · Trace: {{ item.trace || '-' }}</p>
-                    </article>
-                  </section>
+            <HistoryPanel
+              v-model:collapse-value="activeCollapseSections.history"
+              v-model:trace-search="traceSearch"
+              :active="activeWorkbenchTab === 'history'"
+              :selected-kb="selectedKb"
+              :trace-history="traceHistory"
+              :latest-trace="latestTrace"
+              :selected-trace-ids="selectedTraceIds"
+              :selected-traces="selectedTraces"
+              :trace-comparison="traceComparison"
+              :compact-text="compactText"
+              :format-date="formatDate"
+              :format-percent="formatPercent"
+              :format-score="formatScore"
+              @load-history="loadTraceHistory"
+              @clear-compare="clearTraceCompare"
+              @open-trace="openTrace"
+              @toggle-compare="toggleTraceCompare"
+              @create-case-from-trace="createCaseFromTrace"
+            />
 
-                  <section class="trace-section">
-                    <h3>失败请求</h3>
-                    <div v-if="!modelUsage.failed_calls?.length" class="empty-state">暂无失败模型调用。</div>
-                    <article v-for="item in modelUsage.failed_calls" :key="`failed-${item.id}`" class="trace-item">
-                      <div class="trace-item-head">
-                        <strong>{{ item.model }} · {{ item.call_type }}</strong>
-                        <span>{{ formatDate(item.created_at) }}</span>
-                      </div>
-                      <p>{{ item.error_message || '无错误信息' }}</p>
-                    </article>
-                  </section>
-                </template>
-              </div>
-            </details>
+            <DatasetsPanel
+              v-model:collapse-value="activeCollapseSections.datasets"
+              v-model:selected-suite="selectedDatasetSuite"
+              :active="activeWorkbenchTab === 'datasets'"
+              :selected-kb="selectedKb"
+              :eval-suites="evalSuites"
+              :case-sources="caseSources"
+              :benchmark-form="benchmarkForm"
+              :benchmark-cases="benchmarkCases"
+              :busy="busy"
+              @refresh="loadBenchmarkCases"
+              @import-defaults="importDefaultBenchmarkCases"
+              @create-case="createBenchmarkCase"
+              @toggle-case="toggleBenchmarkCase"
+              @delete-case="deleteBenchmarkCase"
+            />
 
-            <details v-show="activeWorkbenchTab === 'history'" class="debug-section">
-              <summary><span>历史调试记录</span><small>保存、查看与对比 RAG Trace</small></summary>
-              <div class="debug-section-body">
-                <div class="trace-history-toolbar">
-                  <input v-model="traceSearch" placeholder="按问题搜索 Trace" @keyup.enter="loadTraceHistory" />
-                  <button type="button" @click="loadTraceHistory" :disabled="!selectedKb">刷新</button>
-                  <button type="button" class="ghost" @click="clearTraceCompare" :disabled="!selectedTraceIds.length">清空对比</button>
-                </div>
-
-                <div v-if="!traceHistory.length" class="empty-state">暂无历史调试记录。发送一次问题后，这里会保存完整 Trace。</div>
-                <div v-else class="trace-history-list">
-                  <article
-                    v-for="trace in traceHistory"
-                    :key="trace.id"
-                    class="trace-history-item"
-                    :class="{ active: latestTrace?.id === trace.id, selected: selectedTraceIds.includes(trace.id) }"
-                  >
-                    <div class="trace-history-main">
-                      <strong>#{{ trace.id }} · {{ compactText(trace.question, 72) }}</strong>
-                      <small>{{ formatDate(trace.created_at) }} · {{ trace.kb_name || selectedKb?.name }}</small>
-                      <div class="trace-summary compact">
-                        <span>{{ trace.retrieval_mode }}</span>
-                        <span>saved {{ formatPercent(trace.compression_stats?.saving_ratio) }}</span>
-                        <span>{{ trace.settings?.vector_store || '-' }}</span>
-                      </div>
-                    </div>
-                    <div class="trace-history-actions">
-                      <button type="button" class="ghost" @click="openTrace(trace)">查看</button>
-                      <button type="button" @click="toggleTraceCompare(trace)">
-                        {{ selectedTraceIds.includes(trace.id) ? '取消' : '对比' }}
-                      </button>
-                    </div>
-                  </article>
-                </div>
-
-                <section v-if="latestTrace" class="trace-history-detail">
-                  <div class="trace-title">
-                    <h3>Trace #{{ latestTrace.id }} 详情</h3>
-                    <span>{{ formatDate(latestTrace.created_at) }}</span>
-                  
-                    <button type="button" class="ghost" @click="createCaseFromTrace(latestTrace)">To Regression</button></div>
-                  <div class="trace-summary">
-                    <span>模式：{{ latestTrace.retrieval_mode }}</span>
-                    <span>Vector：{{ latestTrace.vector_results?.length || 0 }}</span>
-                    <span>BM25：{{ latestTrace.bm25_results?.length || 0 }}</span>
-                    <span>Hybrid：{{ latestTrace.hybrid_results?.length || 0 }}</span>
-                    <span>Rerank：{{ latestTrace.rerank_results?.length || 0 }}</span>
-                    <span>节省：{{ formatPercent(latestTrace.compression_stats?.saving_ratio) }}</span>
-                  </div>
-                  <div class="trace-detail-grid">
-                    <div>
-                      <h4>问题</h4>
-                      <p>{{ latestTrace.question }}</p>
-                    </div>
-                    <div>
-                      <h4>答案</h4>
-                      <p>{{ latestTrace.message_content || '这条 Trace 暂无已关联答案。' }}</p>
-                    </div>
-                  </div>
-                  <section class="trace-section">
-                    <h3>Rerank Top Results</h3>
-                    <article v-for="item in latestTrace.rerank_results?.slice(0, 3)" :key="item.chunk_id" class="trace-item">
-                      <div class="trace-item-head">
-                        <strong>#{{ item.rank }} · {{ item.document }}</strong>
-                        <span>{{ item.engine }} · {{ formatScore(item.rerank_score || item.score) }}</span>
-                      </div>
-                      <p>{{ item.content }}</p>
-                    </article>
-                  </section>
-                  <details class="sentence-details">
-                    <summary>查看压缩后 Context</summary>
-                    <pre>{{ latestTrace.compressed_context }}</pre>
-                  </details>
-                  <details class="sentence-details">
-                    <summary>查看 Final Prompt</summary>
-                    <pre>{{ latestTrace.final_prompt }}</pre>
-                  </details>
-                </section>
-
-                <section v-if="traceComparison" class="trace-compare">
-                  <div class="trace-title">
-                    <h3>Trace 对比</h3>
-                    <span>#{{ selectedTraces[0].id }} ↔ #{{ selectedTraces[1].id }}</span>
-                  </div>
-                  <div class="compare-grid">
-                    <div>
-                      <h4>问题</h4>
-                      <p>{{ selectedTraces[0].question }}</p>
-                    </div>
-                    <div>
-                      <h4>问题</h4>
-                      <p>{{ selectedTraces[1].question }}</p>
-                    </div>
-                  </div>
-
-                  <div class="compare-table">
-                    <div><strong>Vector Top5</strong><span>{{ traceComparison.vectorOrder.left.join(' → ') || '-' }}</span><span>{{ traceComparison.vectorOrder.right.join(' → ') || '-' }}</span></div>
-                    <div><strong>BM25 Top5</strong><span>{{ traceComparison.bm25Order.left.join(' → ') || '-' }}</span><span>{{ traceComparison.bm25Order.right.join(' → ') || '-' }}</span></div>
-                    <div><strong>Hybrid Top5</strong><span>{{ traceComparison.hybridOrder.left.join(' → ') || '-' }}</span><span>{{ traceComparison.hybridOrder.right.join(' → ') || '-' }}</span></div>
-                    <div><strong>Rerank Top5</strong><span>{{ traceComparison.rerankOrder.left.join(' → ') || '-' }}</span><span>{{ traceComparison.rerankOrder.right.join(' → ') || '-' }}</span></div>
-                    <div><strong>压缩后 tokens</strong><span>{{ traceComparison.compressionTokens.left }}</span><span>{{ traceComparison.compressionTokens.right }} ({{ traceComparison.compressionTokens.delta >= 0 ? '+' : '' }}{{ traceComparison.compressionTokens.delta }})</span></div>
-                    <div><strong>节省比例</strong><span>{{ formatPercent(traceComparison.savingRatio.left) }}</span><span>{{ formatPercent(traceComparison.savingRatio.right) }}</span></div>
-                    <div><strong>上下文长度</strong><span>{{ traceComparison.contextLength.left }}</span><span>{{ traceComparison.contextLength.right }} ({{ traceComparison.contextLength.delta >= 0 ? '+' : '' }}{{ traceComparison.contextLength.delta }})</span></div>
-                    <div><strong>答案长度</strong><span>{{ traceComparison.answerLength.left }}</span><span>{{ traceComparison.answerLength.right }} ({{ traceComparison.answerLength.delta >= 0 ? '+' : '' }}{{ traceComparison.answerLength.delta }})</span></div>
-                  </div>
-
-                  <details class="sentence-details">
-                    <summary>参数差异 {{ traceComparison.settingsChanged.length }} 项</summary>
-                    <div v-if="!traceComparison.settingsChanged.length" class="empty-state">两条 Trace 的参数一致。</div>
-                    <div v-else class="settings-diff">
-                      <div v-for="item in traceComparison.settingsChanged" :key="item.key">
-                        <strong>{{ item.key }}</strong>
-                        <span>{{ item.left }}</span>
-                        <span>{{ item.right }}</span>
-                      </div>
-                    </div>
-                  </details>
-                </section>
-              </div>
-            </details>
-
-            <details v-show="activeWorkbenchTab === 'datasets'" class="debug-section">
-              <summary><span>评测基准</span><small>维护 Golden Set 与标准答案</small></summary>
-              <div class="debug-section-body">
-                <div class="trace-history-toolbar">
-                  <select v-model="selectedDatasetSuite" @change="loadBenchmarkCases">
-                    <option value="">All suites</option>
-                    <option v-for="suite in evalSuites" :key="suite.value" :value="suite.value">{{ suite.label }}</option>
-                  </select>
-                  <button type="button" @click="importDefaultBenchmarkCases" :disabled="!selectedKb">导入默认样例</button>
-                  <button type="button" class="ghost" @click="loadBenchmarkCases" :disabled="!selectedKb">刷新</button>
-                  <span class="muted">领域专家维护的回归评测集。运行评测时优先使用启用的基准；没有基准才回退到 JSON 样例。</span>
-                </div>
-
-                <form class="benchmark-form" @submit.prevent="createBenchmarkCase">
-                  <input v-model="benchmarkForm.case_id" placeholder="case_id，例如 publish_stage_tools" />
-                  <input v-model="benchmarkForm.question" placeholder="评测问题" />
-                  <textarea v-model="benchmarkForm.reference" placeholder="标准答案 reference"></textarea>
-                  <input v-model="benchmarkForm.tagsText" placeholder="标签，用逗号分隔" />
-                  <input v-model="benchmarkForm.expectedTermsText" placeholder="expected_terms, comma separated" />
-                  <input v-model="benchmarkForm.targetChunkIdsText" placeholder="target_chunk_ids, comma separated" />
-                  <select v-model="benchmarkForm.suite">
-                    <option v-for="suite in evalSuites" :key="suite.value" :value="suite.value">{{ suite.label }}</option>
-                  </select>
-                  <select v-model="benchmarkForm.source">
-                    <option v-for="source in caseSources" :key="source.value" :value="source.value">{{ source.label }}</option>
-                  </select>
-                  <textarea v-model="benchmarkForm.notes" placeholder="notes: why this case exists, failure history, owner..." />
-                  <select v-model="benchmarkForm.difficulty">
-                    <option value="easy">easy</option>
-                    <option value="medium">medium</option>
-                    <option value="hard">hard</option>
-                  </select>
-                  <label class="check-row">
-                    <input v-model="benchmarkForm.enabled" type="checkbox" />
-                    启用
-                  </label>
-                  <button type="submit" :disabled="!selectedKb">新增基准</button>
-                </form>
-
-                <div v-if="!benchmarkCases.length" class="empty-state">暂无评测基准。可以先导入默认样例，或由领域专家新增标准问题。</div>
-                <div v-else class="benchmark-list">
-                  <article v-for="item in benchmarkCases" :key="item.id" class="benchmark-item" :class="{ disabled: !item.enabled }">
-                    <div class="trace-history-main">
-                      <strong>{{ item.question }}</strong>
-                      <small>{{ item.case_id }} · {{ item.difficulty }} · {{ (item.tags || []).join(', ') || '-' }}</small>
-                      <p>{{ item.reference }}</p>
-                    </div>
-                    <div class="trace-history-actions">
-                      <button type="button" class="ghost" @click="toggleBenchmarkCase(item)">
-                        {{ item.enabled ? '禁用' : '启用' }}
-                      </button>
-                      <button type="button" class="danger" @click="deleteBenchmarkCase(item)">删除</button>
-                    </div>
-                  </article>
-                </div>
-              </div>
-            </details>
-
-            <details v-show="activeWorkbenchTab === 'evaluation'" class="debug-section">
-              <summary><span>评测报告</span><small>运行并查看 RAGAS 评测结果</small></summary>
-              <div class="debug-section-body">
-                <div class="trace-history-toolbar">
-                  <select v-model="selectedEvalSuite">
-                    <option value="">All suites</option>
-                    <option v-for="suite in evalSuites" :key="suite.value" :value="suite.value">{{ suite.label }}</option>
-                  </select>
-                  <button type="button" class="eval-run-button" @click="runEval" :disabled="!selectedKb || isEvalRunning">
-                    {{ isEvalRunning ? '评测中' : '运行评测' }}
-                  </button>
-                  <button type="button" class="ghost" @click="loadEvalRuns" :disabled="!selectedKb">刷新</button>
-                  <span class="muted">使用当前调试参数运行 RAGAS，完成后会自动保存并展示报告。</span>
-                </div>
-
-                <div v-if="!evalRuns.length" class="empty-state">暂无评测报告。点击“运行评测”后，这里会展示每次参数组合的评分。</div>
-                <div v-else class="eval-run-list">
-                  <article
-                    v-for="run in evalRuns"
-                    :key="run.id"
-                    class="eval-run-item"
-                    :class="{ active: selectedEvalRun?.id === run.id }"
-                  >
-                    <div class="trace-history-main">
-                      <strong>#{{ run.id }} · {{ run.status }} · {{ run.case_count }} cases</strong>
-                      <small>{{ formatDate(run.created_at) }} · {{ run.kb_name || selectedKb?.name }}</small>
-                      <div class="eval-score-row">
-                        <span v-for="metric in run.metrics" :key="metric">
-                          {{ metricLabel(metric) }} {{ formatEvalScore(run.mean_scores?.[metric]) }}
-                        </span>
-                      </div>
-                    </div>
-                    <div class="trace-history-actions">
-                      <button type="button" class="ghost" @click="openEvalRun(run)">查看</button>
-                      <button type="button" @click="toggleEvalRunCompare(run)">
-                        {{ selectedEvalRunIds.includes(run.id) ? '取消' : '对比' }}
-                      </button>
-                    </div>
-                  </article>
-                </div>
-
-                <section v-if="evalRunComparison" class="eval-compare">
-                  <div class="trace-title">
-                    <h3>评测 Run 对比</h3>
-                    <span>#{{ selectedEvalRuns[0].id }} ↔ #{{ selectedEvalRuns[1].id }}</span>
-                  </div>
-                  <div class="eval-score-grid">
-                    <div v-for="item in evalRunComparison.metricDeltas" :key="item.metric">
-                      <strong>{{ metricLabel(item.metric) }}</strong>
-                      <span>{{ formatEvalScore(item.right) }}</span>
-                      <small>
-                        {{ formatEvalScore(item.left) }} → {{ formatEvalScore(item.right) }}
-                        <b :class="scoreDeltaClass(item.delta)">
-                          {{ formatSignedScore(item.delta) }}
-                        </b>
-                      </small>
-                    </div>
-                  </div>
-
-                  <details class="sentence-details" open>
-                    <summary>参数差异 {{ evalRunComparison.settingsChanged.length }} 项</summary>
-                    <div v-if="!evalRunComparison.settingsChanged.length" class="empty-state">两次评测的参数一致。</div>
-                    <div v-else class="settings-diff">
-                      <div v-for="item in evalRunComparison.settingsChanged" :key="item.key">
-                        <strong>{{ item.key }}</strong>
-                        <span>{{ item.left }}</span>
-                        <span>{{ item.right }}</span>
-                      </div>
-                    </div>
-                  </details>
-
-                  <div class="eval-case-delta-list">
-                    <article v-for="caseItem in evalRunComparison.caseDeltas" :key="caseItem.case_id" class="eval-case">
-                      <div class="trace-item-head">
-                        <strong>{{ caseItem.question }}</strong>
-                        <span>{{ caseItem.case_id }}</span>
-                      </div>
-                      <div class="compare-table">
-                        <div v-for="metric in caseItem.metrics" :key="metric.metric">
-                          <strong>{{ metricLabel(metric.metric) }}</strong>
-                          <span>{{ formatEvalScore(metric.left) }}</span>
-                          <span>
-                            {{ formatEvalScore(metric.right) }}
-                            <b :class="scoreDeltaClass(metric.delta)">{{ formatSignedScore(metric.delta) }}</b>
-                          </span>
-                        </div>
-                      </div>
-                    </article>
-                  </div>
-                </section>
-
-                <section v-if="selectedEvalRun" class="eval-report">
-                  <div class="trace-title">
-                    <h3>RAGAS Run #{{ selectedEvalRun.id }}</h3>
-                    <span>{{ selectedEvalRun.status }} · {{ formatDate(selectedEvalRun.finished_at || selectedEvalRun.created_at) }}</span>
-                  </div>
-                  <div class="eval-score-grid">
-                    <div v-for="metric in selectedEvalRun.metrics" :key="metric">
-                      <strong>{{ metricLabel(metric) }}</strong>
-                      <span>{{ formatEvalScore(selectedEvalRun.mean_scores?.[metric]) }}</span>
-                    </div>
-                  </div>
-                  <div class="retrieval-metric-grid">
-                    <div v-for="item in retrievalMetricRows(selectedEvalRun.retrieval_metrics)" :key="item.stage">
-                      <strong>{{ item.label }}</strong>
-                      <span>Hit {{ formatEvalScore(item.hit_rate) }}</span>
-                      <small>Recall@K {{ formatEvalScore(item.recall_at_k) }} ? MRR {{ formatEvalScore(item.mrr) }} ? target {{ item.target_case_count }}</small>
-                    </div>
-                  </div>
-                  <div class="trace-summary">
-                    <span>Query Rewrite：{{ selectedEvalRun.settings?.query_rewrite_strategy || '-' }}</span>
-                    <span>Vector top_k：{{ selectedEvalRun.settings?.top_k || '-' }}</span>
-                    <span>BM25 top_k：{{ selectedEvalRun.settings?.bm25_top_k || '-' }}</span>
-                    <span>RRF_K：{{ selectedEvalRun.settings?.rrf_k || '-' }}</span>
-                    <span>Rerank top_n：{{ selectedEvalRun.settings?.rerank_top_n || '-' }}</span>
-                    <span>Compression：{{ selectedEvalRun.settings?.compression_strategy || '-' }}</span>
-                  </div>
-
-                  <section class="failure-analysis">
-                    <div class="trace-title">
-                      <h3>Failure Analysis</h3>
-                      <span>{{ failureAnalysis.totalFailed }} failed signals</span>
-                    </div>
-                    <div class="failure-grid">
-                      <article v-for="group in failureAnalysis.groups" :key="group.key" class="failure-card" :class="{ clean: group.count === 0 }">
-                        <strong>{{ group.label }}</strong>
-                        <span>{{ group.count }}</span>
-                        <small>{{ group.rate }} of cases</small>
-                        <div v-if="group.cases.length" class="failure-case-list">
-                          <button
-                            v-for="caseItem in group.cases.slice(0, 5)"
-                            :key="caseItem.id"
-                            type="button"
-                            class="ghost"
-                            @click="scrollToEvalCase(caseItem.id)"
-                          >
-                            {{ compactText(caseItem.case_id, 32) }}
-                          </button>
-                        </div>
-                      </article>
-                    </div>
-                  </section>
-
-                  <article v-for="item in selectedEvalRun.case_results || []" :key="item.id" :id="`eval-case-${item.id}`" class="eval-case">
-                    <div class="trace-item-head">
-                      <strong>{{ item.question }}</strong>
-                      <span>{{ item.case_id }} · {{ item.rewrite_strategy }} · {{ item.contexts?.length || 0 }} contexts</span>
-                    </div>
-                    <p v-if="item.rewritten_query && item.rewritten_query !== item.question" class="eval-question">
-                      Rewrite: {{ item.rewritten_query }}
-                    </p>
-                    <div class="eval-score-row">
-                      <span v-for="metric in selectedEvalRun.metrics" :key="metric">
-                        {{ metricLabel(metric) }} {{ formatEvalScore(item.scores?.[metric]) }}
-                      </span>
-                    </div>
-                    <div v-if="item.diagnostics" class="diagnostic-chain">
-                      <div
-                        v-for="stage in diagnosticStages(item)"
-                        :key="stage.key"
-                        class="diagnostic-node"
-                        :class="stage.hit ? 'hit' : 'miss'"
-                      >
-                        <strong>{{ stage.label }}</strong>
-                        <span>{{ stage.hit ? '命中' : '未命中' }} - 覆盖 {{ formatDiagnosticPercent(stage.coverage) }}</span>
-                        <small>{{ stage.candidate_count ?? '-' }} candidates - {{ formatTerms(stage.matched_terms) }}</small>
-                        <p v-if="stage.evidence?.snippet">{{ stage.evidence.snippet }}</p>
-                      </div>
-                      <div class="diagnostic-node" :class="finalDiagnostic(item).correct ? 'hit' : 'miss'">
-                        <strong>Final Answer</strong>
-                        <span>{{ finalDiagnostic(item).correct ? '正确' : '待复核' }} - 覆盖 {{ formatDiagnosticPercent(finalDiagnostic(item).coverage) }}</span>
-                        <small>{{ formatTerms(finalDiagnostic(item).matched_terms) }}</small>
-                        <p v-if="finalDiagnostic(item).evidence">{{ finalDiagnostic(item).evidence }}</p>
-                      </div>
-                    </div>
-                    <div class="trace-detail-grid">
-                      <div>
-                        <h4>标准答案</h4>
-                        <p>{{ item.reference }}</p>
-                      </div>
-                      <div>
-                        <h4>模型回答</h4>
-                        <p>{{ item.answer }}</p>
-                      </div>
-                    </div>
-                    <details class="sentence-details">
-                      <summary>查看 Context / Top Chunks</summary>
-                      <div class="trace-summary">
-                        <span>BM25：{{ item.top_chunks?.bm25?.join(' → ') || '-' }}</span>
-                        <span>Vector：{{ item.top_chunks?.vector?.join(' → ') || '-' }}</span>
-                        <span>Hybrid：{{ item.top_chunks?.hybrid?.join(' → ') || '-' }}</span>
-                        <span>Rerank：{{ item.top_chunks?.rerank?.join(' → ') || '-' }}</span>
-                      </div>
-                      <pre>{{ (item.contexts || []).join('\n\n---\n\n') }}</pre>
-                    </details>
-                  </article>
-                </section>
-              </div>
-            </details>
+            <EvaluationPanel
+              v-model:collapse-value="activeCollapseSections.evaluation"
+              v-model:selected-suite="selectedEvalSuite"
+              :active="activeWorkbenchTab === 'evaluation'"
+              :selected-kb="selectedKb"
+              :eval-suites="evalSuites"
+              :is-eval-running="isEvalRunning"
+              :eval-runs="evalRuns"
+              :selected-eval-run="selectedEvalRun"
+              :selected-eval-run-ids="selectedEvalRunIds"
+              :selected-eval-runs="selectedEvalRuns"
+              :selected-baseline-eval-run="selectedBaselineEvalRun"
+              :eval-run-comparison="evalRunComparison"
+              :failure-analysis="failureAnalysis"
+              :rag-options="ragOptions"
+              :busy="busy"
+              :format-date="formatDate"
+              :metric-label="metricLabel"
+              :format-eval-score="formatEvalScore"
+              :score-delta-class="scoreDeltaClass"
+              :format-signed-score="formatSignedScore"
+              :retrieval-metric-rows="retrievalMetricRows"
+              :diagnostic-stages="diagnosticStages"
+              :final-diagnostic="finalDiagnostic"
+              :format-diagnostic-percent="formatDiagnosticPercent"
+              :format-terms="formatTerms"
+              :compact-text="compactText"
+              @run-eval="runEval"
+              @load-runs="loadEvalRuns"
+              @open-run="openEvalRun"
+              @toggle-compare="toggleEvalRunCompare"
+              @set-baseline="setBaselineEvalRun"
+              @compare-baseline="compareEvalRunWithBaseline"
+              @scroll-to-case="scrollToEvalCase"
+            />
           </section>
 
           <div
@@ -803,61 +198,56 @@
             @keydown.right.prevent="nudgeSplitter(4)"
           ></div>
 
-          <section class="card chat">
-            <div class="chat-head">
-              <h2>RAG 对话</h2>
-              <button type="button" @click="newSession" :disabled="!selectedKb">新会话</button>
-            </div>
-            <div class="messages">
-              <article v-for="message in messages" :key="message.id" :class="['message', message.role]">
-                <p class="message-content">
-                  <template v-for="(part, partIndex) in renderMessageParts(message)" :key="`${message.id}-part-${partIndex}`">
-                    <button
-                      v-if="part.type === 'citation'"
-                      type="button"
-                      class="citation-link"
-                      title="Highlight source"
-                      @click="highlightCitation(message, part.number)"
-                    >[{{ part.number }}]</button>
-                    <span v-else>{{ part.text }}</span>
-                  </template>
-                </p>
-                <details
-                  v-if="message.sources?.length"
-                  :open="isSourcePanelOpen(message)"
-                  @toggle="setSourcePanelOpen(message, $event.target.open)"
-                >
-                  <summary>引用来源</summary>
-                  <div
-                    v-for="(source, sourceIndex) in message.sources"
-                    :key="source.chunk_id || sourceIndex"
-                    :class="['source', { active: isSourceHighlighted(message, source, sourceIndex) }]"
-                  >
-                    <strong><span class="source-citation">[{{ sourceCitationNumber(source, sourceIndex) }}]</span> {{ source.document }}</strong>
-                    <span>{{ Number(source.score).toFixed(3) }}</span>
-                    <p>{{ source.content }}</p>
-                  </div>
-                </details>
-              </article>
-            </div>
-            <form class="ask" @submit.prevent="ask">
-              <textarea v-model="question" placeholder="基于已索引文档提问"></textarea>
-              <button :disabled="!selectedKb || loading || !question.trim()">{{ loading ? '回答中' : '发送' }}</button>
-            </form>
-          </section>
+          <RagChatPanel
+            v-model:question="question"
+            :selected-kb="selectedKb"
+            :session="session"
+            :chat-sessions="chatSessions"
+            :messages="messages"
+            :loading="loading"
+            :busy="busy"
+            :feedback-drafts="feedbackDrafts"
+            :feedback-reasons="feedbackReasons"
+            :chat-session-label="chatSessionLabel"
+            :format-date="formatDate"
+            :render-message-parts="renderMessageParts"
+            :feedback-status-text="feedbackStatusText"
+            :is-source-panel-open="isSourcePanelOpen"
+            :is-source-highlighted="isSourceHighlighted"
+            :source-citation-number="sourceCitationNumber"
+            @new-session="newSession"
+            @ask="ask"
+            @select-session="selectChatSession"
+            @delete-session="deleteChatSession"
+            @highlight-citation="highlightCitation"
+            @submit-feedback="submitFeedback"
+            @open-negative-feedback="openNegativeFeedback"
+            @set-source-panel-open="setSourcePanelOpen"
+          />
         </div>
-      </section>
-    </section>
+      </el-main>
+    </el-container>
+    </AuthManager>
   </main>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { api } from './api'
 import { store } from './main'
+import AuthManager from './components/AuthManager.vue'
+import RagChatPanel from './components/Chat/RagChatPanel.vue'
+import AppSidebar from './components/Sidebar/AppSidebar.vue'
+import AgentPanel from './components/Workbench/AgentPanel.vue'
+import ChunkLabPanel from './components/Workbench/ChunkLabPanel.vue'
+import CostsPanel from './components/Workbench/CostsPanel.vue'
+import DatasetsPanel from './components/Workbench/DatasetsPanel.vue'
+import EvaluationPanel from './components/Workbench/EvaluationPanel.vue'
+import HistoryPanel from './components/Workbench/HistoryPanel.vue'
+import WorkbenchTabs from './components/Workbench/WorkbenchTabs.vue'
+import RagDebugPanel from './components/Workbench/RagDebugPanel.vue'
 
-const auth = reactive({ username: 'admin', password: 'admin123' })
-const error = ref('')
 const kbs = ref([])
 const documents = ref([])
 const chunkMethods = ref([])
@@ -867,6 +257,7 @@ const chunks = ref([])
 const stats = reactive({})
 const messages = ref([])
 const session = ref(null)
+const chatSessions = ref([])
 const question = ref('')
 const loading = ref(false)
 const notice = ref('')
@@ -878,37 +269,80 @@ const traceSearch = ref('')
 const evalRuns = ref([])
 const selectedEvalRun = ref(null)
 const selectedEvalRunIds = ref([])
+const selectedBaselineEvalRunId = ref(null)
 const benchmarkCases = ref([])
 const selectedDatasetSuite = ref('')
 const selectedEvalSuite = ref('')
 const activeWorkbenchTab = ref('debug')
+const activeCollapseSections = reactive({
+  chunkLab: ['chunk-lab'],
+  ragDebug: ['rag-debug'],
+  agent: ['agent'],
+  costs: ['costs'],
+  history: ['history'],
+  datasets: ['datasets'],
+  evaluation: ['evaluation'],
+})
 const modelUsage = ref(null)
+const agentResult = ref(null)
+const agentActions = ref([])
+const currentAgentThreadId = ref('')
+const selectedAgentTask = ref('repair')
+const activeExperimentPlan = ref(null)
+const completedAgentActions = ref(new Set())
 const pollingEvalRunIds = ref(new Set())
 const splitterContainer = ref(null)
 const labWidthPercent = ref(Number(localStorage.getItem('labWidthPercent')) || 62)
 const isResizing = ref(false)
 const highlightedSourceRefs = reactive({})
 const openSourcePanels = reactive({})
-const busy = reactive({ preview: false, index: false, upload: false, reset: false, eval: false })
+const feedbackDrafts = reactive({})
+const busy = reactive({
+  preview: false,
+  index: false,
+  upload: false,
+  reset: false,
+  eval: false,
+  evalLoad: false,
+  evalDetail: '',
+  datasetImport: false,
+  datasetRefresh: false,
+  datasetCreate: false,
+  datasetAction: '',
+  agent: false,
+  agentAction: '',
+  feedback: '',
+})
+const feedbackReasons = [
+  { value: 'missed_question', label: '没答到问题' },
+  { value: 'wrong_citation', label: '引用不对' },
+  { value: 'insufficient_context', label: '资料不足' },
+  { value: 'off_topic', label: '答非所问' },
+  { value: 'factual_error', label: '事实错误' },
+  { value: 'too_verbose', label: '太啰嗦' },
+  { value: 'other', label: '其他' },
+]
+
 const workbenchTabs = [
-  { key: 'debug', label: 'Debug', caption: 'Chunking & Retrieval' },
-  { key: 'evaluation', label: 'Evaluation', caption: 'Runs & Metrics' },
-  { key: 'datasets', label: 'Datasets', caption: 'Benchmark Cases' },
-  { key: 'history', label: 'History', caption: 'Trace Review' },
-  { key: 'costs', label: 'Costs', caption: 'Models & Tokens' },
+  { key: 'debug', label: '调试', caption: '切片与检索' },
+  { key: 'evaluation', label: '评测', caption: '评测报告' },
+  { key: 'datasets', label: '评测集', caption: '基准与回归' },
+  { key: 'history', label: '历史', caption: 'Trace 复盘' },
+  { key: 'agent', label: 'Agent', caption: 'RAGOps 诊断' },
+  { key: 'costs', label: '成本', caption: '模型与 Token' },
 ]
 const evalSuites = [
-  { value: 'smoke', label: 'Smoke' },
-  { value: 'benchmark', label: 'Benchmark' },
-  { value: 'regression', label: 'Regression' },
-  { value: 'release', label: 'Release' },
+  { value: 'smoke', label: '冒烟集' },
+  { value: 'benchmark', label: '基准集' },
+  { value: 'regression', label: '回归集' },
+  { value: 'release', label: '发布集' },
 ]
 const caseSources = [
-  { value: 'expert', label: 'Expert' },
-  { value: 'trace', label: 'Trace' },
-  { value: 'eval_failure', label: 'Eval Failure' },
-  { value: 'user_feedback', label: 'User Feedback' },
-  { value: 'default_json', label: 'Default JSON' },
+  { value: 'expert', label: '专家维护' },
+  { value: 'trace', label: 'Trace 沉淀' },
+  { value: 'eval_failure', label: '评测失败沉淀' },
+  { value: 'user_feedback', label: '用户反馈沉淀' },
+  { value: 'default_json', label: '默认样例' },
 ]
 const kbForm = reactive({ name: '默认知识库', description: '' })
 const chunkForm = reactive({
@@ -923,8 +357,17 @@ const ragOptions = reactive({
   rerank_top_n: 5,
   compression_strategy: 'structure_aware',
 })
+const agentForm = reactive({
+  message: '请执行端到端 RAG 修复工作流：收集证据、定位失败阶段、生成优化方案；如果需要创建回归样例或运行参数实验，请先生成待确认动作。',
+  trace_id: '',
+  eval_run_id: '',
+  compare_eval_run_id: '',
+  thread_id: '',
+})
+
 const benchmarkForm = reactive({
   case_id: '',
+  case_type: 'expert',
   question: '',
   reference: '',
   tagsText: '',
@@ -935,6 +378,28 @@ const benchmarkForm = reactive({
   notes: '',
   difficulty: 'medium',
   enabled: true,
+  routerIntent: 'internal_knowledge',
+  rewriteContainsText: '',
+  answerContainsText: '',
+  answerNotContainsText: '',
+  citationRequired: false,
+  vectorHit: false,
+  bm25Hit: false,
+  hybridHit: false,
+  rerankKeep: false,
+  compressionKeepTermsText: '',
+  rubricText: '{\n  "dimensions": []\n}',
+  deterministicMinPassRate: 1,
+  minCorrectnessScore: 0.7,
+  minCitationScore: 0.6,
+  maxHallucinationRisk: 0.3,
+  maxTotalTokens: 0,
+  maxLatencyMs: 0,
+})
+
+watch(activeWorkbenchTab, () => {
+  notice.value = ''
+  actionError.value = ''
 })
 const queryRewriteStrategies = [
   { value: 'rule', label: 'Rule Rewrite', description: '\u89c4\u5219\u6539\u5199\uff0c\u4fbf\u5b9c\u3001\u7a33\u5b9a\u3001\u53ef\u89e3\u91ca\u3002' },
@@ -948,9 +413,109 @@ const compressionStrategies = [
   { value: 'none', label: 'No Compression', description: '不压缩，直接把 Rerank 后的 chunk 作为上下文。' },
 ]
 
+function agentThreadBusinessKey() {
+  const kbId = selectedKb.value?.id || 'none'
+  return [
+    `kb:${kbId}`,
+    `trace:${agentForm.trace_id || 'none'}`,
+    `eval:${agentForm.eval_run_id || 'none'}`,
+    `compare:${agentForm.compare_eval_run_id || 'none'}`,
+  ].join('|')
+}
+
+function agentThreadStorageKey() {
+  return `aiassistant:ragops-agent-thread:${agentThreadBusinessKey()}`
+}
+
+function generateAgentThreadId() {
+  const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return `ragops:${agentThreadBusinessKey().replaceAll('|', ':')}:${random}`
+}
+
+function ensureAgentThreadId() {
+  if (!selectedKb.value) return ''
+  const key = agentThreadStorageKey()
+  let threadId = localStorage.getItem(key)
+  if (!threadId) {
+    threadId = generateAgentThreadId()
+    localStorage.setItem(key, threadId)
+  }
+  currentAgentThreadId.value = threadId
+  agentForm.thread_id = threadId
+  return threadId
+}
+
+function resetAgentThread() {
+  if (!selectedKb.value) return
+  localStorage.removeItem(agentThreadStorageKey())
+  currentAgentThreadId.value = ''
+  agentForm.thread_id = ensureAgentThreadId()
+  agentResult.value = null
+  activeExperimentPlan.value = null
+  notice.value = '已创建新的 Agent 线程'
+}
+
+watch(
+  () => [selectedKb.value?.id, agentForm.trace_id, agentForm.eval_run_id, agentForm.compare_eval_run_id],
+  () => {
+    if (!selectedKb.value) {
+      currentAgentThreadId.value = ''
+      agentForm.thread_id = ''
+      return
+    }
+    const threadId = localStorage.getItem(agentThreadStorageKey()) || ''
+    currentAgentThreadId.value = threadId
+    agentForm.thread_id = threadId
+  }
+)
+
 
 function messageSourceKey(message) {
   return String(message?.id || '')
+}
+
+
+function openNegativeFeedback(message) {
+  feedbackDrafts[message.id] = {
+    open: true,
+    reason: message.feedback?.reason || '',
+    comment: message.feedback?.comment || '',
+  }
+}
+
+async function submitFeedback(message, rating) {
+  if (!message?.id || String(message.id).startsWith('local-') || String(message.id).startsWith('stream-')) return
+  const draft = feedbackDrafts[message.id] || {}
+  if (rating === 'not_helpful' && !draft.reason) {
+    openNegativeFeedback(message)
+    return
+  }
+  busy.feedback = message.id
+  try {
+    const feedback = await api.createUserFeedback({
+      message: message.id,
+      rating,
+      reason: rating === 'not_helpful' ? draft.reason : '',
+      comment: rating === 'not_helpful' ? draft.comment || '' : '',
+    })
+    message.feedback = feedback
+    feedbackDrafts[message.id] = { open: false, reason: '', comment: '' }
+    await loadAgentActions()
+    notice.value = rating === 'not_helpful'
+      ? '已记录负反馈，并生成待确认的回归样例动作'
+      : '已记录正反馈'
+  } catch (err) {
+    actionError.value = err.message
+  } finally {
+    busy.feedback = ''
+  }
+}
+
+function feedbackStatusText(feedback) {
+  if (!feedback) return ''
+  if (feedback.rating === 'helpful') return '已标记有帮助'
+  const reason = feedbackReasons.find((item) => item.value === feedback.reason)?.label || '负反馈'
+  return `已标记没帮助：${reason}`
 }
 
 function renderMessageParts(message) {
@@ -1026,6 +591,11 @@ const selectedEvalRuns = computed(() =>
     .filter(Boolean)
 )
 
+const selectedBaselineEvalRun = computed(() =>
+  evalRuns.value.find((run) => run.id === selectedBaselineEvalRunId.value) || null
+)
+
+
 const failureAnalysis = computed(() => {
   const cases = selectedEvalRun.value?.case_results || []
   const groups = [
@@ -1086,43 +656,7 @@ const traceComparison = computed(() => {
 const evalRunComparison = computed(() => {
   if (selectedEvalRuns.value.length !== 2) return null
   const [left, right] = selectedEvalRuns.value
-  if (!left.case_results || !right.case_results) return null
-  const metricNames = Array.from(new Set([...(left.metrics || []), ...(right.metrics || [])]))
-  const rightCaseMap = new Map((right.case_results || []).map((item) => [item.case_id, item]))
-  return {
-    metricDeltas: metricNames.map((metric) => {
-      const leftScore = numberOrNull(left.mean_scores?.[metric])
-      const rightScore = numberOrNull(right.mean_scores?.[metric])
-      return {
-        metric,
-        left: leftScore,
-        right: rightScore,
-        delta: deltaScore(leftScore, rightScore),
-      }
-    }),
-    retrievalMetricDeltas: compareRetrievalMetrics(left.retrieval_metrics || {}, right.retrieval_metrics || {}),
-    settingsChanged: diffSettings(left.settings || {}, right.settings || {}),
-    caseDeltas: (left.case_results || [])
-      .map((leftCase) => {
-        const rightCase = rightCaseMap.get(leftCase.case_id)
-        if (!rightCase) return null
-        return {
-          case_id: leftCase.case_id,
-          question: rightCase.question || leftCase.question,
-          metrics: metricNames.map((metric) => {
-            const leftScore = numberOrNull(leftCase.scores?.[metric])
-            const rightScore = numberOrNull(rightCase.scores?.[metric])
-            return {
-              metric,
-              left: leftScore,
-              right: rightScore,
-              delta: deltaScore(leftScore, rightScore),
-            }
-          }),
-        }
-      })
-      .filter(Boolean),
-  }
+  return buildEvalRunComparison(left, right)
 })
 
 const currentRewriteDescription = computed(() => {
@@ -1336,21 +870,111 @@ function compareChunkOrder(left = [], right = []) {
   }
 }
 
+const ragParamLabels = {
+  query_rewrite_strategy: 'Query Rewrite',
+  top_k: 'Vector TopK',
+  bm25_top_k: 'BM25 TopK',
+  rrf_k: 'RRF K',
+  rerank_top_n: 'Rerank TopN',
+  compression_strategy: '压缩策略',
+}
+
+function formatSettingValue(value) {
+  if (value === undefined || value === null || value === '') return '-'
+  if (Array.isArray(value)) return value.join(', ')
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
 function diffSettings(left, right) {
-  const keys = Array.from(new Set([...Object.keys(left), ...Object.keys(right)])).sort()
+  const preferredKeys = Object.keys(ragParamLabels)
+  const keys = Array.from(new Set([...preferredKeys, ...Object.keys(left), ...Object.keys(right)]))
   return keys
     .filter((key) => JSON.stringify(left[key]) !== JSON.stringify(right[key]))
-    .map((key) => ({ key, left: left[key], right: right[key] }))
+    .map((key) => ({
+      key,
+      label: ragParamLabels[key] || key,
+      left: formatSettingValue(left[key]),
+      right: formatSettingValue(right[key]),
+    }))
 }
 
 
 
+
+
+function agentTaskTitle() {
+  return '端到端 RAG 修复工作流'
+}
+
+function validateAgentTask() {
+  if (!agentForm.trace_id && !agentForm.eval_run_id) {
+    return '请先选择失败问答 Trace 或 Baseline Eval Run。'
+  }
+  return ''
+}
+
+async function confirmRunAgent() {
+  const validationMessage = validateAgentTask()
+  if (validationMessage) {
+    actionError.value = validationMessage
+    return false
+  }
+  try {
+    await ElMessageBox.confirm(
+      `即将启动：${agentTaskTitle()}。Agent 会读取当前选择的 Trace / Eval Run，生成诊断、优化方案和需要人工确认的动作。`,
+      '确认启动 RAG 修复工作流？',
+      {
+        confirmButtonText: '确认执行',
+        cancelButtonText: '再检查一下',
+        type: 'warning',
+      },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function runAgent() {
+  if (!selectedKb.value || !agentForm.message.trim()) return
+  const shouldRun = await confirmRunAgent()
+  if (!shouldRun) return
+  await runAction(async () => {
+    busy.agent = true
+    completedAgentActions.value = new Set()
+    agentResult.value = await api.runRagopsAgent({
+      kb: selectedKb.value.id,
+      trace: agentForm.trace_id,
+      eval_run: agentForm.eval_run_id,
+      compare_eval_run: agentForm.compare_eval_run_id,
+      thread_id: ensureAgentThreadId(),
+      message: agentForm.message,
+    })
+    currentAgentThreadId.value = agentResult.value?.thread_id || currentAgentThreadId.value
+    agentForm.thread_id = currentAgentThreadId.value
+    activeExperimentPlan.value = agentResult.value?.experiment_plan || null
+    await loadAgentActions()
+  })
+  busy.agent = false
+}
+
 async function loadModelUsage() {
   if (!selectedKb.value) {
     modelUsage.value = null
+    agentResult.value = null
+    agentActions.value = []
     return
   }
   modelUsage.value = await api.getModelUsageSummary({ kb: selectedKb.value.id })
+}
+
+async function loadAgentActions() {
+  if (!selectedKb.value) {
+    agentActions.value = []
+    return
+  }
+  agentActions.value = await api.listAgentActions({ kb: selectedKb.value.id })
 }
 
 async function loadTraceHistory() {
@@ -1388,15 +1012,67 @@ async function loadEvalRuns() {
     benchmarkCases.value = []
     return
   }
-  evalRuns.value = await api.listEvalRuns({ kb: selectedKb.value.id })
-  if (selectedEvalRun.value && !evalRuns.value.some((run) => run.id === selectedEvalRun.value.id)) {
-    selectedEvalRun.value = null
+  busy.evalLoad = true
+  try {
+    evalRuns.value = await api.listEvalRuns({ kb: selectedKb.value.id })
+    if (selectedEvalRun.value && !evalRuns.value.some((run) => run.id === selectedEvalRun.value.id)) {
+      selectedEvalRun.value = null
+    }
+    selectedEvalRunIds.value = selectedEvalRunIds.value.filter((id) => evalRuns.value.some((run) => run.id === id))
+    const runningRun = evalRuns.value.find((run) => run.status === 'running')
+    if (runningRun) {
+      startEvalPolling(runningRun.id)
+    }
+  } finally {
+    busy.evalLoad = false
   }
-  selectedEvalRunIds.value = selectedEvalRunIds.value.filter((id) => evalRuns.value.some((run) => run.id === id))
-  const runningRun = evalRuns.value.find((run) => run.status === 'running')
-  if (runningRun) {
-    startEvalPolling(runningRun.id)
+}
+
+function parseLooseList(value) {
+  return String(value || '')
+    .replace(/\n/g, ',')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function parseJsonField(value, fallback = {}) {
+  const raw = String(value || '').trim()
+  if (!raw) return fallback
+  return JSON.parse(raw)
+}
+
+function buildDeterministicChecks() {
+  const checks = {}
+  if (benchmarkForm.routerIntent) checks.router_intent = benchmarkForm.routerIntent
+  const rewriteContains = parseLooseList(benchmarkForm.rewriteContainsText)
+  if (rewriteContains.length) checks.rewrite_contains = rewriteContains
+  const answerContains = parseLooseList(benchmarkForm.answerContainsText)
+  if (answerContains.length) checks.answer_contains = answerContains
+  const answerNotContains = parseLooseList(benchmarkForm.answerNotContainsText)
+  if (answerNotContains.length) checks.answer_not_contains = answerNotContains
+  if (benchmarkForm.citationRequired) checks.citation_required = true
+  if (benchmarkForm.vectorHit) checks.vector_hit = true
+  if (benchmarkForm.bm25Hit) checks.bm25_hit = true
+  if (benchmarkForm.hybridHit) checks.hybrid_hit = true
+  if (benchmarkForm.rerankKeep) checks.rerank_keep = true
+  const compressionTerms = parseLooseList(benchmarkForm.compressionKeepTermsText)
+  if (compressionTerms.length) checks.compression_keep_terms = compressionTerms
+  if (benchmarkForm.maxTotalTokens > 0) checks.max_total_tokens = benchmarkForm.maxTotalTokens
+  if (benchmarkForm.maxLatencyMs > 0) checks.max_latency_ms = benchmarkForm.maxLatencyMs
+  return checks
+}
+
+function buildThresholds() {
+  const thresholds = {
+    deterministic_min_pass_rate: benchmarkForm.deterministicMinPassRate,
+    min_correctness_score: benchmarkForm.minCorrectnessScore,
+    min_citation_score: benchmarkForm.minCitationScore,
+    max_hallucination_risk: benchmarkForm.maxHallucinationRisk,
   }
+  if (benchmarkForm.maxTotalTokens > 0) thresholds.max_total_tokens = benchmarkForm.maxTotalTokens
+  if (benchmarkForm.maxLatencyMs > 0) thresholds.max_latency_ms = benchmarkForm.maxLatencyMs
+  return thresholds
 }
 
 async function loadBenchmarkCases() {
@@ -1404,11 +1080,17 @@ async function loadBenchmarkCases() {
     benchmarkCases.value = []
     return
   }
-  benchmarkCases.value = await api.listBenchmarkCases({ kb: selectedKb.value.id, suite: selectedDatasetSuite.value })
+  busy.datasetRefresh = true
+  try {
+    benchmarkCases.value = await api.listBenchmarkCases({ kb: selectedKb.value.id, suite: selectedDatasetSuite.value })
+  } finally {
+    busy.datasetRefresh = false
+  }
 }
 
 function resetBenchmarkForm() {
   benchmarkForm.case_id = ''
+  benchmarkForm.case_type = 'expert'
   benchmarkForm.question = ''
   benchmarkForm.reference = ''
   benchmarkForm.tagsText = ''
@@ -1419,20 +1101,54 @@ function resetBenchmarkForm() {
   benchmarkForm.notes = ''
   benchmarkForm.difficulty = 'medium'
   benchmarkForm.enabled = true
+  benchmarkForm.routerIntent = 'internal_knowledge'
+  benchmarkForm.rewriteContainsText = ''
+  benchmarkForm.answerContainsText = ''
+  benchmarkForm.answerNotContainsText = ''
+  benchmarkForm.citationRequired = false
+  benchmarkForm.vectorHit = false
+  benchmarkForm.bm25Hit = false
+  benchmarkForm.hybridHit = false
+  benchmarkForm.rerankKeep = false
+  benchmarkForm.compressionKeepTermsText = ''
+  benchmarkForm.rubricText = '{\n  "dimensions": []\n}'
+  benchmarkForm.deterministicMinPassRate = 1
+  benchmarkForm.minCorrectnessScore = 0.7
+  benchmarkForm.minCitationScore = 0.6
+  benchmarkForm.maxHallucinationRisk = 0.3
+  benchmarkForm.maxTotalTokens = 0
+  benchmarkForm.maxLatencyMs = 0
 }
 
 async function createBenchmarkCase() {
   if (!selectedKb.value) return
-  await runAction(async () => {
+  const missingFields = [
+    ['case_id', '用例编号'],
+    ['question', '评测问题'],
+    ['reference', '标准答案'],
+  ].filter(([key]) => !String(benchmarkForm[key] || '').trim())
+  if (missingFields.length) {
+    actionError.value = `请先填写${missingFields.map(([, label]) => label).join('、')}。`
+    notice.value = ''
+    return
+  }
+  busy.datasetCreate = true
+  try {
+    await runAction(async () => {
+    const rubric = parseJsonField(benchmarkForm.rubricText, {})
     const created = await api.createBenchmarkCase({
       kb: selectedKb.value.id,
-      case_id: benchmarkForm.case_id,
-      question: benchmarkForm.question,
-      reference: benchmarkForm.reference,
+      case_id: benchmarkForm.case_id.trim(),
+      case_type: benchmarkForm.case_type,
+      question: benchmarkForm.question.trim(),
+      reference: benchmarkForm.reference.trim(),
       tags: benchmarkForm.tagsText,
       expected_terms: benchmarkForm.expectedTermsText,
       target_chunk_ids: benchmarkForm.targetChunkIdsText,
       suite: benchmarkForm.suite,
+      deterministic_checks: buildDeterministicChecks(),
+      rubric,
+      thresholds: buildThresholds(),
       source: benchmarkForm.source,
       notes: benchmarkForm.notes,
       difficulty: benchmarkForm.difficulty,
@@ -1440,8 +1156,147 @@ async function createBenchmarkCase() {
     })
     benchmarkCases.value = [...benchmarkCases.value, created].sort((left, right) => left.case_id.localeCompare(right.case_id))
     resetBenchmarkForm()
-    notice.value = `已新增评测基准：${created.case_id}`
-  })
+    notice.value = `已新增 Eval Case：${created.case_id}`
+    })
+  } finally {
+    busy.datasetCreate = false
+  }
+}
+
+function agentActionBusyKey(card) {
+  if (!card) return ''
+  if (card.action_id) return `action-${card.action_id}`
+  return card.action_type || card.action_uid ? `action-${card.id}` : `card-${card.id}`
+}
+
+function agentActionCompletionKey(card) {
+  if (!card) return ''
+  if (card.action_id) return `action-${card.action_id}`
+  return card.action_type || card.action_uid ? `action-${card.id}` : `card-${card.id}`
+}
+
+async function confirmAgentAction(card) {
+  const actionId = card?.action_id || card?.id
+  if (!actionId) return
+  try {
+    await ElMessageBox.confirm(
+      `${card.description || ''}\n\n确认后将执行这条已审计的 Agent 动作。`,
+      card.title || '确认执行 Agent 动作？',
+      {
+        confirmButtonText: '确认执行',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+  const busyId = agentActionBusyKey(card)
+  busy.agentAction = busyId
+  try {
+    const updated = await api.confirmAgentAction(actionId)
+    selectedDatasetSuite.value = 'regression'
+    await loadBenchmarkCases()
+    await loadAgentActions()
+    if (agentResult.value?.action_cards?.length) {
+      agentResult.value.action_cards = agentResult.value.action_cards.map((item) =>
+        item.action_id === updated.id
+          ? { ...item, status: updated.status, created_case_id: updated.created_case_id, result: updated.result }
+          : item
+      )
+    }
+    if (updated.status === 'completed') {
+      const next = new Set(completedAgentActions.value)
+      next.add(agentActionCompletionKey(card))
+      completedAgentActions.value = next
+    }
+    if (updated.action_type === 'run_experiment_plan' && updated.result?.plan_id) {
+      activeExperimentPlan.value = await api.getExperimentPlan(updated.result.plan_id)
+      pollExperimentPlan(updated.result.plan_id)
+    }
+    notice.value = `Agent 动作${actionStatusText(updated)}：${updated.created_case_id || updated.result?.plan_id || displayActionTitle(updated)}`
+  } finally {
+    busy.agentAction = ''
+  }
+}
+
+
+
+async function refreshExperimentPlan(planId = activeExperimentPlan.value?.id) {
+  if (!planId) return
+  activeExperimentPlan.value = await api.getExperimentPlan(planId)
+  return activeExperimentPlan.value
+}
+
+async function pollExperimentPlan(planId) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const plan = await refreshExperimentPlan(planId)
+    if (!plan || ['completed', 'failed'].includes(plan.status)) {
+      if (plan?.status === 'completed') {
+        await loadEvalRuns()
+        notice.value = `实验计划 #${plan.id} 已完成，推荐 Winner：${plan.recommendation?.winner_name || '-'}`
+      }
+      return
+    }
+    await sleep(3000)
+  }
+}
+
+function hasDiagnosis(diagnosis) {
+  return Boolean(diagnosis && (diagnosis.summary || diagnosis.failure_signals?.length || diagnosis.recommendations?.length))
+}
+
+function diagnosisSeverityText(severity) {
+  const map = {
+    high: '高风险',
+    medium: '中风险',
+    low: '低风险',
+    info: '观察',
+  }
+  return map[severity] || '观察'
+}
+
+function diagnosisSeverityClass(severity) {
+  return severity || 'info'
+}
+
+function displayActionTitle(action) {
+  const title = action?.title || ''
+  const map = {
+    'Create Regression Case': '创建 Regression Case',
+    'Create Regression Case from Failure': '从失败样例创建 Regression Case',
+  }
+  return map[title] || title
+}
+
+function displayActionSource(source) {
+  const map = {
+    trace: 'Trace',
+    eval_failure: '评测失败',
+  }
+  return map[source] || source || '-'
+}
+
+function isAgentCardDone(card) {
+  return completedAgentActions.value.has(agentActionCompletionKey(card)) || card?.status === 'completed'
+}
+
+function actionStatusText(action) {
+  if (!action) return '-'
+  if (action.status === 'completed') return `已完成${action.created_case_id ? ` -> ${action.created_case_id}` : ''}`
+  if (action.status === 'failed') return '失败'
+  if (action.status === 'rejected') return '已拒绝'
+  return '待确认'
+}
+
+function actionFailureSignals(card) {
+  return card?.failure_signals || card?.payload?.failure_signals || []
+}
+
+function actionCardMeta(card) {
+  if (card?.source === 'trace') return `Trace #${card.payload?.trace || '-'}`
+  if (card?.source === 'eval_failure') return `Eval Case Result #${card.payload?.eval_case || '-'}`
+  return card?.source || ''
 }
 
 async function createCaseFromTrace(trace) {
@@ -1469,29 +1324,124 @@ async function createCaseFromEvalCase(item) {
 
 async function importDefaultBenchmarkCases() {
   if (!selectedKb.value) return
-  await runAction(async () => {
-    const result = await api.importDefaultBenchmarkCases(selectedKb.value.id)
-    benchmarkCases.value = result.cases
-    notice.value = `已导入默认评测基准：新增 ${result.created} 条，更新 ${result.updated} 条`
-  })
+  busy.datasetImport = true
+  try {
+    await runAction(async () => {
+      const result = await api.importDefaultBenchmarkCases(selectedKb.value.id)
+      benchmarkCases.value = result.cases
+      notice.value = `已导入默认评测基准：新增 ${result.created} 条，更新 ${result.updated} 条`
+    })
+  } finally {
+    busy.datasetImport = false
+  }
 }
 
 async function toggleBenchmarkCase(item) {
-  const updated = await api.updateBenchmarkCase(item.id, { enabled: !item.enabled })
-  benchmarkCases.value = benchmarkCases.value.map((caseItem) => (caseItem.id === updated.id ? updated : caseItem))
+  busy.datasetAction = item.id
+  try {
+    await runAction(async () => {
+      const updated = await api.updateBenchmarkCase(item.id, { enabled: !item.enabled })
+      benchmarkCases.value = benchmarkCases.value.map((caseItem) => (caseItem.id === updated.id ? updated : caseItem))
+    })
+  } finally {
+    busy.datasetAction = ''
+  }
 }
 
 async function deleteBenchmarkCase(item) {
-  const confirmed = window.confirm(`确认删除评测基准 ${item.case_id}？`)
-  if (!confirmed) return
-  await api.deleteBenchmarkCase(item.id)
-  benchmarkCases.value = benchmarkCases.value.filter((caseItem) => caseItem.id !== item.id)
+  try {
+    await ElMessageBox.confirm(
+      `删除后该评测用例将不再参与后续评测。`,
+      `确认删除评测基准 ${item.case_id}？`,
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+  busy.datasetAction = `delete-${item.id}`
+  try {
+    await runAction(async () => {
+      await api.deleteBenchmarkCase(item.id)
+      benchmarkCases.value = benchmarkCases.value.filter((caseItem) => caseItem.id !== item.id)
+    })
+  } finally {
+    busy.datasetAction = ''
+  }
+}
+
+function buildEvalRunComparison(left, right) {
+  if (!left?.case_results || !right?.case_results) return null
+  const metricNames = Array.from(new Set([...(left.metrics || []), ...(right.metrics || [])]))
+  const rightCaseMap = new Map((right.case_results || []).map((item) => [item.case_id, item]))
+  return {
+    metricDeltas: metricNames.map((metric) => {
+      const leftScore = numberOrNull(left.mean_scores?.[metric])
+      const rightScore = numberOrNull(right.mean_scores?.[metric])
+      return {
+        metric,
+        left: leftScore,
+        right: rightScore,
+        delta: deltaScore(leftScore, rightScore),
+      }
+    }),
+    retrievalMetricDeltas: compareRetrievalMetrics(left.retrieval_metrics || {}, right.retrieval_metrics || {}),
+    settingsChanged: diffSettings(left.settings || {}, right.settings || {}),
+    caseDeltas: (left.case_results || [])
+      .map((leftCase) => {
+        const rightCase = rightCaseMap.get(leftCase.case_id)
+        if (!rightCase) return null
+        return {
+          case_id: leftCase.case_id,
+          question: rightCase.question || leftCase.question,
+          metrics: metricNames.map((metric) => {
+            const leftScore = numberOrNull(leftCase.scores?.[metric])
+            const rightScore = numberOrNull(rightCase.scores?.[metric])
+            return {
+              metric,
+              left: leftScore,
+              right: rightScore,
+              delta: deltaScore(leftScore, rightScore),
+            }
+          }),
+        }
+      })
+      .filter(Boolean),
+  }
 }
 
 async function openEvalRun(run) {
-  const detail = run.case_results ? run : await api.getEvalRun(run.id)
-  selectedEvalRun.value = detail
-  evalRuns.value = evalRuns.value.map((item) => (item.id === detail.id ? detail : item))
+  busy.evalDetail = run.id
+  try {
+    const detail = run.case_results ? run : await api.getEvalRun(run.id)
+    selectedEvalRun.value = detail
+    evalRuns.value = evalRuns.value.map((item) => (item.id === detail.id ? detail : item))
+    if (detail.baseline_run && !selectedBaselineEvalRunId.value) {
+      selectedBaselineEvalRunId.value = detail.baseline_run
+    }
+  } finally {
+    busy.evalDetail = ''
+  }
+}
+
+async function setBaselineEvalRun(run) {
+  if (!run?.id) return
+  if (!run.case_results) await openEvalRun(run)
+  selectedBaselineEvalRunId.value = run.id
+  notice.value = `已设置 Baseline Run #${run.id}（${run.param_signature || 'no-signature'}）`
+}
+
+async function compareEvalRunWithBaseline(run) {
+  if (!run?.id || !selectedBaselineEvalRunId.value || selectedBaselineEvalRunId.value === run.id) return
+  const baseline = evalRuns.value.find((item) => item.id === selectedBaselineEvalRunId.value)
+  if (!baseline) return
+  if (!baseline.case_results) await openEvalRun(baseline)
+  if (!run.case_results) await openEvalRun(run)
+  selectedEvalRunIds.value = [selectedBaselineEvalRunId.value, run.id]
 }
 
 async function toggleEvalRunCompare(run) {
@@ -1519,6 +1469,7 @@ async function runEval() {
     const startedRun = await api.runEval({
       kb: selectedKb.value.id,
       suite: selectedEvalSuite.value,
+      baseline_run: selectedBaselineEvalRunId.value || undefined,
       rag_options: { ...ragOptions },
     })
     selectedEvalRun.value = startedRun
@@ -1589,41 +1540,30 @@ function clearTraceCompare() {
   selectedTraceIds.value = []
 }
 
-async function login() {
-  error.value = ''
-  try {
-    const token = await api.login(auth.username, auth.password)
-    store.access = token.access
-    store.refresh = token.refresh
-    localStorage.setItem('access', token.access)
-    localStorage.setItem('refresh', token.refresh)
-    await bootstrap()
-  } catch (err) {
-    error.value = err.message
-  }
-}
-
-async function register() {
-  error.value = ''
-  try {
-    await api.register(auth.username, auth.password)
-    await login()
-  } catch (err) {
-    error.value = err.message
-  }
-}
-
-function logout() {
-  store.access = ''
-  store.refresh = ''
-  localStorage.clear()
-}
-
 async function resetWorkspace() {
-  const firstConfirm = window.confirm('确认要重置当前账号的所有知识库、文档、切片、会话和聊天记录吗？')
-  if (!firstConfirm) return
-  const secondConfirm = window.confirm('此操作会同时删除 Milvus 向量索引和已上传文件，且不可恢复。再次确认重置？')
-  if (!secondConfirm) return
+  try {
+    await ElMessageBox.confirm(
+      '此操作会删除当前账号的所有知识库、文档、切片、会话和聊天记录。',
+      '确认重置当前工作区？',
+      {
+        confirmButtonText: '继续',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+    await ElMessageBox.confirm(
+      '此操作会同时删除 Milvus 向量索引和已上传文件，且不可恢复。',
+      '再次确认重置？',
+      {
+        confirmButtonText: '确认重置',
+        cancelButtonText: '取消',
+        type: 'error',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
 
   await runAction(async () => {
     busy.reset = true
@@ -1644,6 +1584,7 @@ async function resetWorkspace() {
     selectedEvalRunIds.value = []
     benchmarkCases.value = []
     modelUsage.value = null
+    agentResult.value = null
     notice.value = `已重置：知识库 ${result.deleted.knowledge_bases} 个，文档 ${result.deleted.documents} 个，切片 ${result.deleted.chunks} 个，会话 ${result.deleted.chat_sessions} 个`
     await loadKbs()
     documents.value = await api.listDocuments()
@@ -1659,6 +1600,8 @@ async function bootstrap() {
   await loadTraceHistory()
   await loadEvalRuns()
   await loadBenchmarkCases()
+  await loadAgentActions()
+  await loadChatSessions({ restore: true })
 }
 
 async function loadKbs() {
@@ -1681,16 +1624,22 @@ function selectKb(kb) {
   chunks.value = []
   messages.value = []
   session.value = null
+  chatSessions.value = []
   latestTrace.value = null
   selectedTraceIds.value = []
   evalRuns.value = []
   selectedEvalRun.value = null
   selectedEvalRunIds.value = []
   benchmarkCases.value = []
+  agentActions.value = []
+  chatSessions.value = []
   loadTraceHistory()
   loadEvalRuns()
   loadBenchmarkCases()
   loadModelUsage()
+  loadAgentActions()
+  loadChatSessions({ restore: true })
+  agentResult.value = null
 }
 
 function selectDocument(doc) {
@@ -1699,8 +1648,8 @@ function selectDocument(doc) {
   Object.keys(stats).forEach((key) => delete stats[key])
 }
 
-async function upload(event) {
-  const file = event.target.files?.[0]
+async function upload(payload) {
+  const file = payload?.raw || payload?.target?.files?.[0]
   if (!file || !selectedKb.value) return
   await runAction(async () => {
     busy.upload = true
@@ -1738,9 +1687,91 @@ async function indexDoc() {
   busy.index = false
 }
 
+function lastSessionStorageKey(kbId = selectedKb.value?.id) {
+  return kbId ? `aiassistant:last-session:${kbId}` : ''
+}
+
+function rememberSession(sessionId, kbId = selectedKb.value?.id) {
+  const key = lastSessionStorageKey(kbId)
+  if (key && sessionId) localStorage.setItem(key, String(sessionId))
+}
+
+async function loadChatSessions({ restore = false } = {}) {
+  if (!selectedKb.value) {
+    chatSessions.value = []
+    return
+  }
+  chatSessions.value = await api.listSessions({ kb: selectedKb.value.id })
+  if (session.value?.id) {
+    const refreshedCurrent = chatSessions.value.find((item) => item.id === session.value.id)
+    if (refreshedCurrent) session.value = refreshedCurrent
+  }
+  if (!restore) return
+  const savedId = Number(localStorage.getItem(lastSessionStorageKey()) || 0)
+  const target = chatSessions.value.find((item) => item.id === savedId) || chatSessions.value[0]
+  if (target) {
+    await selectChatSession(target, { remember: false })
+  }
+}
+
+async function selectChatSessionById(value) {
+  const id = Number(value)
+  const target = chatSessions.value.find((item) => item.id === id)
+  if (target) await selectChatSession(target)
+}
+
+async function selectChatSession(item, { remember = true } = {}) {
+  session.value = item
+  messages.value = await api.listMessages(item.id)
+  if (remember) rememberSession(item.id, item.kb)
+}
+
+async function deleteChatSession(item) {
+  if (!item?.id) return
+  try {
+    await ElMessageBox.confirm(
+      '删除后该会话的消息、Trace 和反馈记录也会一并删除。',
+      `确认删除会话 #${item.id}？`,
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+  await runAction(async () => {
+    await api.deleteSession(item.id)
+    const deletedCurrent = session.value?.id === item.id
+    chatSessions.value = chatSessions.value.filter((sessionItem) => sessionItem.id !== item.id)
+    if (String(localStorage.getItem(lastSessionStorageKey(item.kb))) === String(item.id)) {
+      localStorage.removeItem(lastSessionStorageKey(item.kb))
+    }
+    if (deletedCurrent) {
+      const nextSession = chatSessions.value[0] || null
+      session.value = nextSession
+      messages.value = nextSession ? await api.listMessages(nextSession.id) : []
+      latestTrace.value = null
+      if (nextSession) rememberSession(nextSession.id, nextSession.kb)
+    }
+    await loadTraceHistory()
+    await loadModelUsage()
+    notice.value = `已删除会话 #${item.id}`
+  })
+}
+
+function chatSessionLabel(item) {
+  const count = item.message_count ?? 0
+  return `#${item.id} · ${item.display_title || item.title || 'RAG 问答'} · ${count} 条`
+}
+
 async function newSession() {
   session.value = await api.createSession({ kb: selectedKb.value.id, title: 'RAG 问答' })
   messages.value = []
+  rememberSession(session.value.id)
+  await loadChatSessions()
   notice.value = '已创建新会话'
 }
 
@@ -1777,6 +1808,9 @@ async function ask() {
         latestTrace.value = message.trace || latestTrace.value
         loadTraceHistory()
         loadModelUsage()
+        loadChatSessions().then(() => {
+          if (session.value?.id) rememberSession(session.value.id)
+        })
       },
       onError: (data) => {
         throw new Error(data.detail || 'Stream failed')
@@ -1807,16 +1841,6 @@ async function runAction(fn) {
     busy.eval = false
   }
 }
-
-onMounted(async () => {
-  if (store.access) {
-    try {
-      await bootstrap()
-    } catch {
-      logout()
-    }
-  }
-})
 
 onBeforeUnmount(() => {
   stopResize()

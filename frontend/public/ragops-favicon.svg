@@ -1,0 +1,35 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>RAGOps Favicon</title>
+  <desc>Minimal professional high-saturation RAGOps favicon with R letter and data layer motif.</desc>
+
+  <defs>
+    <linearGradient id="blueGrad" x1="10" y1="8" x2="52" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0066FF"/>
+      <stop offset="1" stop-color="#1230D8"/>
+    </linearGradient>
+    <linearGradient id="cyanGrad" x1="22" y1="38" x2="42" y2="50" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00D4FF"/>
+      <stop offset="1" stop-color="#009BFF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Main R shape -->
+  <path
+    d="M14 10C14 7.8 15.8 6 18 6H34C45.2 6 53 12.7 53 22.2C53 29.2 49.2 34.2 43.4 36.6L54.2 53.7C55.5 55.8 54 58.5 51.5 58.5H42.4C41 58.5 39.7 57.8 39 56.6L28.8 40.2H25.5V54.5C25.5 56.7 23.7 58.5 21.5 58.5H18C15.8 58.5 14 56.7 14 54.5V10ZM25.5 16.5V30.2H33.7C38.5 30.2 41.4 27.6 41.4 23.3C41.4 19 38.5 16.5 33.7 16.5H25.5Z"
+    fill="url(#blueGrad)"
+  />
+
+  <!-- Data layer / retrieval core -->
+  <path
+    d="M18.5 39.5L32 32L45.5 39.5L32 47L18.5 39.5Z"
+    fill="white"
+    opacity="0.96"
+  />
+  <path
+    d="M23.2 39.5L32 34.7L40.8 39.5L32 44.3L23.2 39.5Z"
+    fill="url(#cyanGrad)"
+  />
+
+  <!-- Small ops node accent -->
+  <circle cx="49.5" cy="11.5" r="4.5" fill="#FF7A00"/>
+</svg>

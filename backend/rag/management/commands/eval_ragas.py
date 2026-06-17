@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 import asyncio
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from rag.compression import compress_context
 from rag.hybrid import rrf_fusion
 from rag.models import Chunk, KnowledgeBase, RagBenchmarkCase, RagEvalCaseResult, RagEvalRun
 from rag.query_rewrite import rewrite_query
+from rag.query_router import classify_query_route
 from rag.rerank import rerank_candidates
 from rag.services import get_openai_client, retrieve
 
@@ -155,7 +157,10 @@ class Command(BaseCommand):
                     pipeline_result["reference"],
                     scores,
                 )
-                results.append({**pipeline_result, "scores": scores})
+                enriched_result = {**pipeline_result, "scores": scores}
+                enriched_result["deterministic_results"] = self.score_deterministic(enriched_result)
+                enriched_result["judge_results"] = self.score_with_llm_judge(enriched_result)
+                results.append(enriched_result)
 
             summary = {
                 "kb": {"id": kb.id, "name": kb.name},
@@ -163,6 +168,8 @@ class Command(BaseCommand):
                 "metrics": metric_names,
                 "mean_scores": self.mean_scores(results, metric_names),
                 "retrieval_metrics": self.aggregate_retrieval_metrics(results),
+                "deterministic": self.aggregate_deterministic_results(results),
+                "judge": self.aggregate_judge_results(results),
                 "eval_run_id": eval_run.id if eval_run else None,
             }
             payload = {"summary": summary, "results": results}
@@ -222,10 +229,14 @@ class Command(BaseCommand):
                     "id": item.case_id,
                     "question": item.question,
                     "reference": item.reference,
+                    "case_type": item.case_type,
                     "tags": item.tags,
                     "expected_terms": item.expected_terms,
                     "target_chunk_ids": item.target_chunk_ids,
                     "suite": item.suite,
+                    "deterministic_checks": item.deterministic_checks,
+                    "rubric": item.rubric,
+                    "thresholds": item.thresholds,
                     "source": item.source,
                     "notes": item.notes,
                     "difficulty": item.difficulty,
@@ -242,6 +253,11 @@ class Command(BaseCommand):
         for case in cases:
             if not (case.get("reference") or case.get("ground_truth") or case.get("expected_answer")):
                 raise CommandError(f"Case {case.get('id') or case.get('question')} has no reference answer.")
+            case.setdefault("case_type", "expert")
+            case.setdefault("suite", suite or "benchmark")
+            case.setdefault("deterministic_checks", {})
+            case.setdefault("rubric", {})
+            case.setdefault("thresholds", {})
         return cases, "json_fallback"
 
     def get_kb(self, kb_id: int | None) -> KnowledgeBase | None:
@@ -342,8 +358,10 @@ class Command(BaseCommand):
         if not question:
             raise CommandError(f"Case {case.get('id') or '<missing id>'} has no question.")
 
+        started_at = time.monotonic()
         rewrite_result = rewrite_query(question, options["query_rewrite_strategy"])
         retrieval_query = rewrite_result["rewritten_query"]
+        route_decision = classify_query_route(question, retrieval_query).as_dict()
         vector_top_k = options["top_k"]
         bm25_top_k = options["bm25_top_k"]
         rerank_top_n = options["rerank_top_n"]
@@ -365,6 +383,7 @@ class Command(BaseCommand):
         contexts = [source.get("content") or "" for source in compressed_results if source.get("content")]
         compressed_context = self.join_context(compressed_results)
         answer = self.answer_question(question, compressed_context)
+        latency_ms = round((time.monotonic() - started_at) * 1000)
         reference = case.get("reference") or case.get("ground_truth") or case.get("expected_answer")
         expected_terms = self.normalize_expected_terms(case.get("expected_terms")) or self.extract_reference_terms(reference)
         target_chunk_ids = self.normalize_chunk_ids(case.get("target_chunk_ids"))
@@ -384,6 +403,11 @@ class Command(BaseCommand):
             "id": case.get("id") or question[:32],
             "question": question,
             "reference": reference,
+            "case_type": case.get("case_type") or "",
+            "suite": case.get("suite") or "",
+            "deterministic_checks": case.get("deterministic_checks") or {},
+            "rubric": case.get("rubric") or {},
+            "thresholds": case.get("thresholds") or {},
             "rewritten_query": retrieval_query,
             "rewrite_strategy": rewrite_result["rewrite_strategy"],
             "answer": answer,
@@ -392,6 +416,9 @@ class Command(BaseCommand):
             "expected_terms": expected_terms,
             "target_chunk_ids": target_chunk_ids,
             "diagnostics": diagnostics,
+            "router": route_decision,
+            "latency_ms": latency_ms,
+            "estimated_total_tokens": self.estimate_total_tokens(question, compressed_context, answer),
             "compression_stats": compression_stats,
             "top_chunks": {
                 "bm25": self.top_chunk_ids(bm25_results),
@@ -541,6 +568,148 @@ class Command(BaseCommand):
             "evidence": best_evidence,
         }
 
+    def estimate_total_tokens(self, *parts: str) -> int:
+        text = "\n".join(str(part or "") for part in parts)
+        ascii_words = re.findall(r"[A-Za-z0-9_][A-Za-z0-9_\-]*", text)
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
+        other_chars = max(len(text) - sum(len(word) for word in ascii_words) - len(cjk_chars), 0)
+        return len(ascii_words) + len(cjk_chars) + math.ceil(other_chars / 4)
+
+    def normalize_check_terms(self, value: Any) -> list[str]:
+        if value in (None, False, ""):
+            return []
+        if value is True:
+            return []
+        if isinstance(value, str):
+            raw_items = [item.strip() for item in value.replace("\n", ",").split(",")]
+        else:
+            raw_items = value if isinstance(value, list) else [value]
+        return [str(item).strip() for item in raw_items if str(item or "").strip()]
+
+    def contains_all(self, text: str, terms: list[str]) -> tuple[bool, list[str], list[str]]:
+        normalized = str(text or "").lower()
+        passed = []
+        failed = []
+        for term in terms:
+            if str(term).lower() in normalized:
+                passed.append(term)
+            else:
+                failed.append(term)
+        return not failed, passed, failed
+
+    def contains_none(self, text: str, terms: list[str]) -> tuple[bool, list[str]]:
+        normalized = str(text or "").lower()
+        found = [term for term in terms if str(term).lower() in normalized]
+        return not found, found
+
+    def check_stage_hit(self, result: dict, stage: str) -> bool:
+        return bool(result.get("diagnostics", {}).get("stages", {}).get(stage, {}).get("hit"))
+
+    def add_check_result(self, rows: list[dict], key: str, passed: bool, expected: Any, actual: Any, detail: str = ""):
+        rows.append({
+            "key": key,
+            "passed": bool(passed),
+            "expected": expected,
+            "actual": actual,
+            "detail": detail,
+        })
+
+    def score_deterministic(self, result: dict) -> dict:
+        checks = result.get("deterministic_checks") or {}
+        thresholds = result.get("thresholds") or {}
+        rows = []
+        if not isinstance(checks, dict):
+            checks = {}
+
+        if "router_intent" in checks:
+            actual = result.get("router", {}).get("query_intent")
+            self.add_check_result(rows, "router_intent", actual == checks.get("router_intent"), checks.get("router_intent"), actual)
+
+        if "rewrite_contains" in checks:
+            terms = self.normalize_check_terms(checks.get("rewrite_contains"))
+            passed, matched, missing = self.contains_all(result.get("rewritten_query", ""), terms)
+            self.add_check_result(rows, "rewrite_contains", passed, terms, {"matched": matched, "missing": missing})
+
+        if "answer_contains" in checks:
+            terms = self.normalize_check_terms(checks.get("answer_contains"))
+            passed, matched, missing = self.contains_all(result.get("answer", ""), terms)
+            self.add_check_result(rows, "answer_contains", passed, terms, {"matched": matched, "missing": missing})
+
+        if "answer_not_contains" in checks:
+            terms = self.normalize_check_terms(checks.get("answer_not_contains"))
+            passed, found = self.contains_none(result.get("answer", ""), terms)
+            self.add_check_result(rows, "answer_not_contains", passed, terms, {"found": found})
+
+        if checks.get("citation_required"):
+            answer = result.get("answer", "")
+            citation_found = bool(re.search(r"(\[[^\]]+\]|来源|出处|source|chunk|文档)", answer, re.IGNORECASE))
+            self.add_check_result(rows, "citation_required", citation_found, True, citation_found)
+
+        for key, stage in [("vector_hit", "vector"), ("bm25_hit", "bm25"), ("hybrid_hit", "hybrid")]:
+            if key in checks:
+                actual = self.check_stage_hit(result, stage)
+                self.add_check_result(rows, key, actual == bool(checks.get(key)), bool(checks.get(key)), actual)
+
+        if "rerank_keep" in checks:
+            actual = self.check_stage_hit(result, "rerank")
+            self.add_check_result(rows, "rerank_keep", actual == bool(checks.get("rerank_keep")), bool(checks.get("rerank_keep")), actual)
+
+        if "compression_keep_terms" in checks:
+            expected_terms = self.normalize_check_terms(checks.get("compression_keep_terms")) or result.get("expected_terms", [])
+            compression_text = "\n".join(result.get("contexts") or [])
+            passed, matched, missing = self.contains_all(compression_text, expected_terms)
+            self.add_check_result(rows, "compression_keep_terms", passed, expected_terms, {"matched": matched, "missing": missing})
+
+        max_total_tokens = checks.get("max_total_tokens", thresholds.get("max_total_tokens"))
+        if max_total_tokens not in (None, ""):
+            try:
+                expected = int(max_total_tokens)
+                actual = int(result.get("estimated_total_tokens") or 0)
+                self.add_check_result(rows, "max_total_tokens", actual <= expected, expected, actual)
+            except (TypeError, ValueError):
+                self.add_check_result(rows, "max_total_tokens", False, max_total_tokens, "invalid threshold")
+
+        max_latency_ms = checks.get("max_latency_ms", thresholds.get("max_latency_ms"))
+        if max_latency_ms not in (None, ""):
+            try:
+                expected = int(max_latency_ms)
+                actual = int(result.get("latency_ms") or 0)
+                self.add_check_result(rows, "max_latency_ms", actual <= expected, expected, actual)
+            except (TypeError, ValueError):
+                self.add_check_result(rows, "max_latency_ms", False, max_latency_ms, "invalid threshold")
+
+        total = len(rows)
+        passed_count = sum(1 for row in rows if row.get("passed"))
+        pass_rate = round(passed_count / total, 4) if total else None
+        min_pass_rate = thresholds.get("deterministic_min_pass_rate", 1) if isinstance(thresholds, dict) else 1
+        try:
+            min_pass_rate = float(min_pass_rate)
+        except (TypeError, ValueError):
+            min_pass_rate = 1
+        overall_passed = True if total == 0 else pass_rate >= min_pass_rate
+        return {
+            "passed": overall_passed,
+            "pass_rate": pass_rate,
+            "passed_count": passed_count,
+            "failed_count": total - passed_count,
+            "total_count": total,
+            "min_pass_rate": min_pass_rate,
+            "checks": rows,
+        }
+
+    def aggregate_deterministic_results(self, results: list[dict]) -> dict:
+        scored = [item.get("deterministic_results") or {} for item in results if item.get("deterministic_results", {}).get("total_count") is not None]
+        with_checks = [item for item in scored if item.get("total_count", 0) > 0]
+        if not with_checks:
+            return {"case_count": 0, "pass_rate": None, "failed_count": 0}
+        passed_count = sum(1 for item in with_checks if item.get("passed"))
+        return {
+            "case_count": len(with_checks),
+            "passed_count": passed_count,
+            "failed_count": len(with_checks) - passed_count,
+            "pass_rate": round(passed_count / len(with_checks), 4),
+        }
+
     def build_final_answer_diagnostic(self, answer: str, reference: str, scores: dict) -> dict:
         reference_terms = self.extract_reference_terms(reference)
         matched_terms = self.match_terms(answer, reference_terms)
@@ -663,6 +832,140 @@ class Command(BaseCommand):
             }
         return metrics
 
+    def normalize_judge_score(self, value: Any, default: float = 0) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        if math.isnan(number):
+            return default
+        return round(min(max(number, 0), 1), 4)
+
+    def parse_judge_json(self, raw: str) -> dict:
+        value = str(raw or "").strip()
+        if value.startswith("```"):
+            value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE).strip()
+            value = re.sub(r"\s*```$", "", value).strip()
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[\s\S]*\}", value)
+            if not match:
+                raise
+            parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict):
+            raise ValueError("Judge response must be a JSON object.")
+        return parsed
+
+    def judge_prompt(self, result: dict) -> str:
+        rubric = result.get("rubric") or {}
+        contexts = result.get("contexts") or []
+        compact_contexts = []
+        for index, context in enumerate(contexts[:8], start=1):
+            compact_contexts.append(f"[context {index}] {str(context or '')[:1800]}")
+        schema = {
+            "correctness_score": "number between 0 and 1",
+            "citation_score": "number between 0 and 1",
+            "hallucination_risk": "number between 0 and 1; higher means more risky",
+            "reason": "short Chinese explanation, <= 160 chars",
+        }
+        return (
+            "你是 AIAssistant/RAGPilot 的专家评测 Judge。请只根据给定的标准答案和检索上下文评价模型回答，"
+            "不要引入外部知识。评分必须严格输出 JSON，不要输出 Markdown。\n\n"
+            "评分定义：\n"
+            "- correctness_score: 回答是否覆盖标准答案的核心事实，0 表示完全错误，1 表示完全正确。\n"
+            "- citation_score: 回答中的关键结论是否能被 contexts 支撑，0 表示无支撑，1 表示充分支撑。\n"
+            "- hallucination_risk: 回答是否包含 contexts/reference 不支持的编造或过度推断，0 表示低风险，1 表示高风险。\n"
+            "- reason: 用中文简要说明主要扣分点或通过依据。\n\n"
+            f"JSON Schema: {json.dumps(schema, ensure_ascii=False)}\n\n"
+            f"Question:\n{result.get('question', '')}\n\n"
+            f"Reference Answer:\n{result.get('reference', '')}\n\n"
+            f"Rubric:\n{json.dumps(rubric, ensure_ascii=False)}\n\n"
+            f"Contexts:\n{chr(10).join(compact_contexts) or '无'}\n\n"
+            f"Model Answer:\n{result.get('answer', '')}\n\n"
+            "只输出形如 {\"correctness_score\":0.8,\"citation_score\":0.7,\"hallucination_risk\":0.1,\"reason\":\"...\"} 的 JSON。"
+        )
+
+    def score_with_llm_judge(self, result: dict) -> dict:
+        prompt = self.judge_prompt(result)
+        try:
+            messages = [
+                {"role": "system", "content": "You are a strict JSON-only RAG evaluation judge."},
+                {"role": "user", "content": prompt},
+            ]
+            client = get_openai_client()
+            try:
+                completion = client.chat.completions.create(
+                    model=settings.CHAT_MODEL,
+                    messages=messages,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as exc:
+                if "response_format" not in str(exc).lower() and "json" not in str(exc).lower():
+                    raise
+                completion = client.chat.completions.create(
+                    model=settings.CHAT_MODEL,
+                    messages=messages,
+                    temperature=0,
+                )
+            raw = completion.choices[0].message.content or "{}"
+            parsed = self.parse_judge_json(raw)
+            normalized = {
+                "correctness_score": self.normalize_judge_score(parsed.get("correctness_score")),
+                "citation_score": self.normalize_judge_score(parsed.get("citation_score")),
+                "hallucination_risk": self.normalize_judge_score(parsed.get("hallucination_risk")),
+                "reason": str(parsed.get("reason") or "").strip()[:500],
+                "raw": parsed,
+                "model": settings.CHAT_MODEL,
+                "prompt_version": "rag_judge_v1",
+            }
+            thresholds = result.get("thresholds") or {}
+            min_correctness = self.normalize_judge_score(thresholds.get("min_correctness_score", 0.7), 0.7)
+            min_citation = self.normalize_judge_score(thresholds.get("min_citation_score", 0.6), 0.6)
+            max_hallucination = self.normalize_judge_score(thresholds.get("max_hallucination_risk", 0.3), 0.3)
+            normalized["thresholds"] = {
+                "min_correctness_score": min_correctness,
+                "min_citation_score": min_citation,
+                "max_hallucination_risk": max_hallucination,
+            }
+            normalized["passed"] = (
+                normalized["correctness_score"] >= min_correctness
+                and normalized["citation_score"] >= min_citation
+                and normalized["hallucination_risk"] <= max_hallucination
+            )
+            return normalized
+        except Exception as exc:
+            return {
+                "passed": False,
+                "error": str(exc),
+                "correctness_score": None,
+                "citation_score": None,
+                "hallucination_risk": None,
+                "reason": "Judge 评分失败。",
+                "model": settings.CHAT_MODEL,
+                "prompt_version": "rag_judge_v1",
+            }
+
+    def aggregate_judge_results(self, results: list[dict]) -> dict:
+        judge_rows = [item.get("judge_results") or {} for item in results if item.get("judge_results")]
+        scored = [item for item in judge_rows if item.get("correctness_score") is not None]
+        if not scored:
+            return {"case_count": 0, "pass_rate": None}
+        passed_count = sum(1 for item in scored if item.get("passed"))
+        def mean(key: str):
+            values = [item.get(key) for item in scored if item.get(key) is not None]
+            return round(sum(values) / len(values), 4) if values else None
+        return {
+            "case_count": len(scored),
+            "passed_count": passed_count,
+            "failed_count": len(scored) - passed_count,
+            "pass_rate": round(passed_count / len(scored), 4),
+            "mean_correctness_score": mean("correctness_score"),
+            "mean_citation_score": mean("citation_score"),
+            "mean_hallucination_risk": mean("hallucination_risk"),
+        }
+
     def print_results(self, payload: dict):
         self.stdout.write("")
         for result in payload["results"]:
@@ -672,6 +975,19 @@ class Command(BaseCommand):
             self.stdout.write(f"  contexts: {result['context_count']}")
             for metric_name, score in result["scores"].items():
                 self.stdout.write(f"  {metric_name}: {score}")
+            deterministic = result.get("deterministic_results") or {}
+            if deterministic.get("total_count"):
+                self.stdout.write(
+                    f"  deterministic: {deterministic.get('passed_count')}/{deterministic.get('total_count')} "
+                    f"passed={deterministic.get('passed')}"
+                )
+            judge = result.get("judge_results") or {}
+            if judge:
+                self.stdout.write(
+                    f"  judge: correctness={judge.get('correctness_score')} "
+                    f"citation={judge.get('citation_score')} hallucination={judge.get('hallucination_risk')} "
+                    f"passed={judge.get('passed')}"
+                )
         self.stdout.write("")
         self.stdout.write(self.style.SUCCESS("RAGAS mean scores"))
         for metric_name, score in payload["summary"]["mean_scores"].items():
@@ -687,6 +1003,8 @@ class Command(BaseCommand):
                     case_id=result["id"],
                     question=result["question"],
                     reference=result["reference"],
+                    case_type=result.get("case_type", ""),
+                    suite=result.get("suite", ""),
                     answer=result["answer"],
                     rewritten_query=result["rewritten_query"],
                     rewrite_strategy=result["rewrite_strategy"],
@@ -695,13 +1013,19 @@ class Command(BaseCommand):
                     compression_stats=result["compression_stats"],
                     top_chunks=result["top_chunks"],
                     diagnostics=result.get("diagnostics", {}),
+                    deterministic_results=result.get("deterministic_results", {}),
+                    judge_results=result.get("judge_results", {}),
                 )
                 for result in results
             ]
         )
         eval_run.status = "completed"
         eval_run.mean_scores = summary["mean_scores"]
-        eval_run.retrieval_metrics = summary.get("retrieval_metrics", {})
+        eval_run.retrieval_metrics = {
+            **summary.get("retrieval_metrics", {}),
+            "deterministic": summary.get("deterministic", {}),
+            "judge": summary.get("judge", {}),
+        }
         eval_run.case_count = len(results)
         eval_run.finished_at = timezone.now()
         eval_run.save(update_fields=["status", "mean_scores", "retrieval_metrics", "case_count", "finished_at"])
