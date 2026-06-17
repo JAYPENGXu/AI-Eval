@@ -817,6 +817,7 @@ def serialize_action_card(action: RagAgentAction, decision: dict | None = None) 
     return {
         "id": f"action-{action.id}",
         "action_id": action.id,
+        "action_type": action.action_type,
         "title": action.title,
         "description": action.description,
         "confirm_label": action.confirm_label,

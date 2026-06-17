@@ -391,6 +391,7 @@ class RagEvalCaseResult(models.Model):
 class RagAgentAction(models.Model):
     STATUS_CHOICES = [
         ("pending", "Pending"),
+        ("running", "Running"),
         ("completed", "Completed"),
         ("failed", "Failed"),
         ("rejected", "Rejected"),

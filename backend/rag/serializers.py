@@ -37,7 +37,27 @@ class KnowledgeBaseSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "description", "created_at", "updated_at"]
 
 
+class OwnedKnowledgeBaseRelatedField(serializers.PrimaryKeyRelatedField):
+    """Limit kb choices to knowledge bases owned by the current request user."""
+
+    default_error_messages = {
+        "does_not_exist": "Knowledge base not found.",
+        "invalid": "Knowledge base not found.",
+    }
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("queryset", KnowledgeBase.objects.none())
+        super().__init__(**kwargs)
+
+    def get_queryset(self):
+        request = self.context.get("request")
+        if request and request.user.is_authenticated:
+            return KnowledgeBase.objects.filter(owner=request.user)
+        return KnowledgeBase.objects.none()
+
+
 class DocumentSerializer(serializers.ModelSerializer):
+    kb = OwnedKnowledgeBaseRelatedField()
     chunk_count = serializers.IntegerField(source="chunks.count", read_only=True)
 
     class Meta:
@@ -81,6 +101,7 @@ class ChatSessionSummarySerializer(serializers.ModelSerializer):
 
 
 class ChatSessionSerializer(serializers.ModelSerializer):
+    kb = OwnedKnowledgeBaseRelatedField()
     message_count = serializers.IntegerField(source="messages.count", read_only=True)
     display_title = serializers.SerializerMethodField()
     summary_state = ChatSessionSummarySerializer(read_only=True)
@@ -280,6 +301,8 @@ class RagAgentActionSerializer(serializers.ModelSerializer):
 
 
 class RagBenchmarkCaseSerializer(serializers.ModelSerializer):
+    kb = OwnedKnowledgeBaseRelatedField()
+
     class Meta:
         model = RagBenchmarkCase
         fields = [

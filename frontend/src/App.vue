@@ -93,6 +93,7 @@
               :action-failure-signals="actionFailureSignals"
               :action-card-meta="actionCardMeta"
               :is-agent-card-done="isAgentCardDone"
+              :is-agent-card-running="isAgentCardRunning"
               :display-action-title="displayActionTitle"
               :action-status-text="actionStatusText"
               @run-agent="runAgent"
@@ -247,6 +248,24 @@ import EvaluationPanel from './components/Workbench/EvaluationPanel.vue'
 import HistoryPanel from './components/Workbench/HistoryPanel.vue'
 import WorkbenchTabs from './components/Workbench/WorkbenchTabs.vue'
 import RagDebugPanel from './components/Workbench/RagDebugPanel.vue'
+import {
+  compactText,
+  compareChunkOrder,
+  diagnosticStages,
+  diffSettings,
+  finalDiagnostic,
+  formatDate,
+  formatDiagnosticPercent,
+  formatEvalScore,
+  formatSignedScore,
+  formatTerms,
+  metricLabel,
+  retrievalMetricRows,
+  scoreDeltaClass,
+} from './composables/helpers'
+import { useEvalRuns } from './composables/useEvalRuns'
+import { useChat } from './composables/useChat'
+import { useAgent } from './composables/useAgent'
 
 const kbs = ref([])
 const documents = ref([])
@@ -255,24 +274,14 @@ const selectedKb = ref(null)
 const selectedDocument = ref(null)
 const chunks = ref([])
 const stats = reactive({})
-const messages = ref([])
-const session = ref(null)
-const chatSessions = ref([])
-const question = ref('')
-const loading = ref(false)
 const notice = ref('')
 const actionError = ref('')
 const latestTrace = ref(null)
 const traceHistory = ref([])
 const selectedTraceIds = ref([])
 const traceSearch = ref('')
-const evalRuns = ref([])
-const selectedEvalRun = ref(null)
-const selectedEvalRunIds = ref([])
-const selectedBaselineEvalRunId = ref(null)
 const benchmarkCases = ref([])
 const selectedDatasetSuite = ref('')
-const selectedEvalSuite = ref('')
 const activeWorkbenchTab = ref('debug')
 const activeCollapseSections = reactive({
   chunkLab: ['chunk-lab'],
@@ -284,19 +293,9 @@ const activeCollapseSections = reactive({
   evaluation: ['evaluation'],
 })
 const modelUsage = ref(null)
-const agentResult = ref(null)
-const agentActions = ref([])
-const currentAgentThreadId = ref('')
-const selectedAgentTask = ref('repair')
-const activeExperimentPlan = ref(null)
-const completedAgentActions = ref(new Set())
-const pollingEvalRunIds = ref(new Set())
 const splitterContainer = ref(null)
 const labWidthPercent = ref(Number(localStorage.getItem('labWidthPercent')) || 62)
 const isResizing = ref(false)
-const highlightedSourceRefs = reactive({})
-const openSourcePanels = reactive({})
-const feedbackDrafts = reactive({})
 const busy = reactive({
   preview: false,
   index: false,
@@ -413,170 +412,164 @@ const compressionStrategies = [
   { value: 'none', label: 'No Compression', description: '不压缩，直接把 Rerank 后的 chunk 作为上下文。' },
 ]
 
-function agentThreadBusinessKey() {
-  const kbId = selectedKb.value?.id || 'none'
-  return [
-    `kb:${kbId}`,
-    `trace:${agentForm.trace_id || 'none'}`,
-    `eval:${agentForm.eval_run_id || 'none'}`,
-    `compare:${agentForm.compare_eval_run_id || 'none'}`,
-  ].join('|')
-}
-
-function agentThreadStorageKey() {
-  return `aiassistant:ragops-agent-thread:${agentThreadBusinessKey()}`
-}
-
-function generateAgentThreadId() {
-  const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
-  return `ragops:${agentThreadBusinessKey().replaceAll('|', ':')}:${random}`
-}
-
-function ensureAgentThreadId() {
-  if (!selectedKb.value) return ''
-  const key = agentThreadStorageKey()
-  let threadId = localStorage.getItem(key)
-  if (!threadId) {
-    threadId = generateAgentThreadId()
-    localStorage.setItem(key, threadId)
-  }
-  currentAgentThreadId.value = threadId
-  agentForm.thread_id = threadId
-  return threadId
-}
-
-function resetAgentThread() {
-  if (!selectedKb.value) return
-  localStorage.removeItem(agentThreadStorageKey())
-  currentAgentThreadId.value = ''
-  agentForm.thread_id = ensureAgentThreadId()
-  agentResult.value = null
-  activeExperimentPlan.value = null
-  notice.value = '已创建新的 Agent 线程'
-}
-
-watch(
-  () => [selectedKb.value?.id, agentForm.trace_id, agentForm.eval_run_id, agentForm.compare_eval_run_id],
-  () => {
-    if (!selectedKb.value) {
-      currentAgentThreadId.value = ''
-      agentForm.thread_id = ''
-      return
-    }
-    const threadId = localStorage.getItem(agentThreadStorageKey()) || ''
-    currentAgentThreadId.value = threadId
-    agentForm.thread_id = threadId
-  }
-)
-
-
-function messageSourceKey(message) {
-  return String(message?.id || '')
-}
-
-
-function openNegativeFeedback(message) {
-  feedbackDrafts[message.id] = {
-    open: true,
-    reason: message.feedback?.reason || '',
-    comment: message.feedback?.comment || '',
-  }
-}
-
-async function submitFeedback(message, rating) {
-  if (!message?.id || String(message.id).startsWith('local-') || String(message.id).startsWith('stream-')) return
-  const draft = feedbackDrafts[message.id] || {}
-  if (rating === 'not_helpful' && !draft.reason) {
-    openNegativeFeedback(message)
-    return
-  }
-  busy.feedback = message.id
+async function runAction(fn) {
+  actionError.value = ''
+  notice.value = ''
   try {
-    const feedback = await api.createUserFeedback({
-      message: message.id,
-      rating,
-      reason: rating === 'not_helpful' ? draft.reason : '',
-      comment: rating === 'not_helpful' ? draft.comment || '' : '',
-    })
-    message.feedback = feedback
-    feedbackDrafts[message.id] = { open: false, reason: '', comment: '' }
-    await loadAgentActions()
-    notice.value = rating === 'not_helpful'
-      ? '已记录负反馈，并生成待确认的回归样例动作'
-      : '已记录正反馈'
+    await fn()
   } catch (err) {
     actionError.value = err.message
   } finally {
-    busy.feedback = ''
+    busy.preview = false
+    busy.index = false
+    busy.upload = false
+    busy.reset = false
+    busy.eval = false
   }
 }
 
-function feedbackStatusText(feedback) {
-  if (!feedback) return ''
-  if (feedback.rating === 'helpful') return '已标记有帮助'
-  const reason = feedbackReasons.find((item) => item.value === feedback.reason)?.label || '负反馈'
-  return `已标记没帮助：${reason}`
-}
-
-function renderMessageParts(message) {
-  const content = message?.content || ''
-  const sourceCount = message?.sources?.length || 0
-  const parts = []
-  const pattern = /\[(\d+)\]/g
-  let lastIndex = 0
-  let match
-  while ((match = pattern.exec(content))) {
-    const citationNumber = Number(match[1])
-    const isKnownCitation = sourceCount > 0 && citationNumber >= 1 && citationNumber <= sourceCount
-    if (!isKnownCitation) continue
-    if (match.index > lastIndex) {
-      parts.push({ type: 'text', text: content.slice(lastIndex, match.index) })
-    }
-    parts.push({ type: 'citation', number: citationNumber })
-    lastIndex = pattern.lastIndex
+async function loadBenchmarkCases() {
+  if (!selectedKb.value) {
+    benchmarkCases.value = []
+    return
   }
-  if (lastIndex < content.length) {
-    parts.push({ type: 'text', text: content.slice(lastIndex) })
+  busy.datasetRefresh = true
+  try {
+    benchmarkCases.value = await api.listBenchmarkCases({ kb: selectedKb.value.id, suite: selectedDatasetSuite.value })
+  } finally {
+    busy.datasetRefresh = false
   }
-  return parts.length ? parts : [{ type: 'text', text: content }]
 }
 
-function sourceCitationNumber(source, index) {
-  return Number(source?.citation_id || index + 1)
+const {
+  evalRuns,
+  selectedEvalRun,
+  selectedEvalRunIds,
+  selectedBaselineEvalRunId,
+  selectedEvalSuite,
+  pollingEvalRunIds,
+  isEvalRunning,
+  selectedEvalRuns,
+  selectedBaselineEvalRun,
+  failureAnalysis,
+  evalRunComparison,
+  resetEvalState,
+  loadEvalRuns,
+  openEvalRun,
+  setBaselineEvalRun,
+  compareEvalRunWithBaseline,
+  toggleEvalRunCompare,
+  runEval,
+  scrollToEvalCase,
+} = useEvalRuns({
+  selectedKb,
+  busy,
+  ragOptions,
+  notice,
+  actionError,
+  runAction,
+  benchmarkCases,
+})
+
+const {
+  agentResult,
+  agentActions,
+  currentAgentThreadId,
+  activeExperimentPlan,
+  resetAgentState,
+  resetAgentThread,
+  runAgent,
+  loadAgentActions,
+  confirmAgentAction,
+  refreshExperimentPlan,
+  hasDiagnosis,
+  diagnosisSeverityText,
+  diagnosisSeverityClass,
+  displayActionTitle,
+  isAgentCardDone,
+  isAgentCardRunning,
+  actionStatusText,
+  actionFailureSignals,
+  actionCardMeta,
+} = useAgent({
+  selectedKb,
+  agentForm,
+  busy,
+  notice,
+  actionError,
+  runAction,
+  loadBenchmarkCases,
+  loadEvalRuns,
+  selectedDatasetSuite,
+})
+
+async function loadModelUsage() {
+  if (!selectedKb.value) {
+    modelUsage.value = null
+    resetAgentState()
+    return
+  }
+  modelUsage.value = await api.getModelUsageSummary({ kb: selectedKb.value.id })
 }
 
-function highlightCitation(message, citationNumber) {
-  const key = messageSourceKey(message)
-  openSourcePanels[key] = true
-  highlightedSourceRefs[key] = Number(citationNumber)
-  window.setTimeout(() => {
-    if (highlightedSourceRefs[key] === Number(citationNumber)) {
-      delete highlightedSourceRefs[key]
-    }
-  }, 2200)
+async function loadTraceHistory() {
+  if (!selectedKb.value) {
+    traceHistory.value = []
+    selectedTraceIds.value = []
+    resetEvalState()
+    benchmarkCases.value = []
+    modelUsage.value = null
+    return
+  }
+  const traces = await api.listTraces({ kb: selectedKb.value.id, question: traceSearch.value })
+  traceHistory.value = await Promise.all(
+    traces.map(async (trace) => {
+      const existing = traceHistory.value.find((item) => item.id === trace.id)
+      return existing && existing.vector_results ? existing : trace
+    })
+  )
+  selectedTraceIds.value = selectedTraceIds.value.filter((id) => traceHistory.value.some((trace) => trace.id === id))
 }
 
-function isSourcePanelOpen(message) {
-  return Boolean(openSourcePanels[messageSourceKey(message)])
-}
-
-function setSourcePanelOpen(message, isOpen) {
-  openSourcePanels[messageSourceKey(message)] = isOpen
-}
-
-function isSourceHighlighted(message, source, index) {
-  return highlightedSourceRefs[messageSourceKey(message)] === sourceCitationNumber(source, index)
-}
+const {
+  messages,
+  session,
+  chatSessions,
+  question,
+  loading,
+  feedbackDrafts,
+  resetChatState,
+  openNegativeFeedback,
+  submitFeedback,
+  feedbackStatusText,
+  renderMessageParts,
+  sourceCitationNumber,
+  highlightCitation,
+  isSourcePanelOpen,
+  setSourcePanelOpen,
+  isSourceHighlighted,
+  loadChatSessions,
+  selectChatSession,
+  deleteChatSession,
+  chatSessionLabel,
+  newSession,
+  ask,
+} = useChat({
+  selectedKb,
+  ragOptions,
+  latestTrace,
+  notice,
+  actionError,
+  busy,
+  feedbackReasons,
+  runAction,
+  loadTraceHistory,
+  loadModelUsage,
+  loadAgentActions,
+})
 
 const filteredDocuments = computed(() =>
   selectedKb.value ? documents.value.filter((doc) => doc.kb === selectedKb.value.id) : []
-)
-
-const isEvalRunning = computed(() =>
-  busy.eval ||
-  pollingEvalRunIds.value.size > 0 ||
-  selectedEvalRun.value?.status === 'running' ||
-  evalRuns.value.some((run) => run.status === 'running')
 )
 
 const selectedTraces = computed(() =>
@@ -584,41 +577,6 @@ const selectedTraces = computed(() =>
     .map((id) => traceHistory.value.find((trace) => trace.id === id))
     .filter(Boolean)
 )
-
-const selectedEvalRuns = computed(() =>
-  selectedEvalRunIds.value
-    .map((id) => evalRuns.value.find((run) => run.id === id))
-    .filter(Boolean)
-)
-
-const selectedBaselineEvalRun = computed(() =>
-  evalRuns.value.find((run) => run.id === selectedBaselineEvalRunId.value) || null
-)
-
-
-const failureAnalysis = computed(() => {
-  const cases = selectedEvalRun.value?.case_results || []
-  const groups = [
-    { key: 'vector', label: 'Vector Miss' },
-    { key: 'bm25', label: 'BM25 Miss' },
-    { key: 'hybrid', label: 'Hybrid Drop' },
-    { key: 'rerank', label: 'Rerank Drop' },
-    { key: 'compression', label: 'Compression Lost' },
-    { key: 'final_answer', label: 'Final Answer Wrong' },
-  ].map((group) => {
-    const failedCases = cases.filter((item) => isCaseFailedAt(item, group.key))
-    return {
-      ...group,
-      count: failedCases.length,
-      rate: cases.length ? `${Math.round((failedCases.length / cases.length) * 100)}%` : '-',
-      cases: failedCases,
-    }
-  })
-  return {
-    groups,
-    totalFailed: groups.reduce((sum, group) => sum + group.count, 0),
-  }
-})
 
 const traceComparison = computed(() => {
   if (selectedTraces.value.length !== 2) return null
@@ -651,12 +609,6 @@ const traceComparison = computed(() => {
     },
     settingsChanged: diffSettings(left.settings || {}, right.settings || {}),
   }
-})
-
-const evalRunComparison = computed(() => {
-  if (selectedEvalRuns.value.length !== 2) return null
-  const [left, right] = selectedEvalRuns.value
-  return buildEvalRunComparison(left, right)
 })
 
 const currentRewriteDescription = computed(() => {
@@ -717,122 +669,6 @@ function formatPercent(value) {
   return Number.isFinite(number) ? `${Math.round(number * 100)}%` : '-'
 }
 
-function formatEvalScore(value) {
-  const number = Number(value)
-  return Number.isFinite(number) ? number.toFixed(4) : '-'
-}
-
-function formatSignedScore(value) {
-  const number = Number(value)
-  if (!Number.isFinite(number)) return ''
-  return `${number >= 0 ? '+' : ''}${number.toFixed(4)}`
-}
-
-function scoreDeltaClass(value) {
-  const number = Number(value)
-  if (!Number.isFinite(number) || number === 0) return 'score-delta neutral'
-  return number > 0 ? 'score-delta positive' : 'score-delta negative'
-}
-
-function numberOrNull(value) {
-  const number = Number(value)
-  return Number.isFinite(number) ? number : null
-}
-
-function deltaScore(left, right) {
-  return left === null || right === null ? null : right - left
-}
-
-function metricLabel(metric) {
-  const labels = {
-    faithfulness: 'Faithfulness',
-    answer_relevancy: 'Answer Relevancy',
-    context_precision: 'Context Precision',
-    context_recall: 'Context Recall',
-  }
-  return labels[metric] || metric
-}
-
-const retrievalStages = [
-  { key: 'vector', label: 'Vector' },
-  { key: 'bm25', label: 'BM25' },
-  { key: 'hybrid', label: 'Hybrid' },
-  { key: 'rerank', label: 'Rerank' },
-  { key: 'compression', label: 'Compression' },
-]
-
-function retrievalMetricRows(metrics = {}) {
-  return retrievalStages.map((stage) => ({
-    stage: stage.key,
-    label: stage.label,
-    hit_rate: numberOrNull(metrics?.[stage.key]?.hit_rate),
-    recall_at_k: numberOrNull(metrics?.[stage.key]?.recall_at_k),
-    mrr: numberOrNull(metrics?.[stage.key]?.mrr),
-    target_case_count: metrics?.[stage.key]?.target_case_count || 0,
-  }))
-}
-
-function compareRetrievalMetrics(leftMetrics = {}, rightMetrics = {}) {
-  return retrievalMetricRows(rightMetrics).flatMap((rightRow) => {
-    const leftRow = retrievalMetricRows(leftMetrics).find((item) => item.stage === rightRow.stage) || {}
-    return ['hit_rate', 'recall_at_k', 'mrr'].map((metric) => {
-      const leftValue = numberOrNull(leftRow[metric])
-      const rightValue = numberOrNull(rightRow[metric])
-      return {
-        stage: rightRow.stage,
-        metric,
-        label: `${rightRow.label} ${metric}`,
-        left: leftValue,
-        right: rightValue,
-        delta: deltaScore(leftValue, rightValue),
-      }
-    })
-  })
-}
-
-function isCaseFailedAt(item, stageKey) {
-  if (stageKey === 'final_answer') {
-    const finalAnswer = item.diagnostics?.final_answer
-    return !!finalAnswer && finalAnswer.correct === false
-  }
-  const stage = item.diagnostics?.stages?.[stageKey]
-  return !!stage && stage.hit === false
-}
-
-function scrollToEvalCase(id) {
-  window.requestAnimationFrame(() => {
-    document.getElementById(`eval-case-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  })
-}
-
-function diagnosticStages(item) {
-  const stages = item.diagnostics?.stages || {}
-  return [
-    { key: 'vector', label: 'Vector TopK', ...(stages.vector || {}) },
-    { key: 'bm25', label: 'BM25 TopK', ...(stages.bm25 || {}) },
-    { key: 'hybrid', label: 'Hybrid TopK', ...(stages.hybrid || {}) },
-    { key: 'rerank', label: 'Rerank TopN', ...(stages.rerank || {}) },
-    { key: 'compression', label: 'Compression', ...(stages.compression || {}) },
-  ]
-}
-
-function finalDiagnostic(item) {
-  return item.diagnostics?.final_answer || {}
-}
-
-function formatDiagnosticPercent(value) {
-  const number = Number(value)
-  if (!Number.isFinite(number)) return '-'
-  return `${Math.round(number * 100)}%`
-}
-
-function formatTerms(terms) {
-  if (!terms || !terms.length) return '无关键项命中'
-  return terms.slice(0, 6).join('、')
-}
-
-
-
 function formatCost(value) {
   const amount = Number(value || 0)
   if (!amount) return '$0.0000'
@@ -843,189 +679,6 @@ function formatCostShare(value, total) {
   const denominator = Number(total || 0)
   if (!denominator) return '-'
   return `${Math.round((Number(value || 0) / denominator) * 100)}%`
-}
-
-function formatDate(value) {
-  return value ? new Date(value).toLocaleString() : '-'
-}
-
-function compactText(value, length = 88) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim()
-  return text.length > length ? `${text.slice(0, length)}...` : text
-}
-
-function chunkOrder(results = []) {
-  return results.slice(0, 5).map((item) => item.chunk_id).filter(Boolean)
-}
-
-function compareChunkOrder(left = [], right = []) {
-  const leftOrder = chunkOrder(left)
-  const rightOrder = chunkOrder(right)
-  const shared = leftOrder.filter((id) => rightOrder.includes(id))
-  return {
-    left: leftOrder,
-    right: rightOrder,
-    sameTop1: leftOrder[0] && leftOrder[0] === rightOrder[0],
-    sharedCount: shared.length,
-  }
-}
-
-const ragParamLabels = {
-  query_rewrite_strategy: 'Query Rewrite',
-  top_k: 'Vector TopK',
-  bm25_top_k: 'BM25 TopK',
-  rrf_k: 'RRF K',
-  rerank_top_n: 'Rerank TopN',
-  compression_strategy: '压缩策略',
-}
-
-function formatSettingValue(value) {
-  if (value === undefined || value === null || value === '') return '-'
-  if (Array.isArray(value)) return value.join(', ')
-  if (typeof value === 'object') return JSON.stringify(value)
-  return String(value)
-}
-
-function diffSettings(left, right) {
-  const preferredKeys = Object.keys(ragParamLabels)
-  const keys = Array.from(new Set([...preferredKeys, ...Object.keys(left), ...Object.keys(right)]))
-  return keys
-    .filter((key) => JSON.stringify(left[key]) !== JSON.stringify(right[key]))
-    .map((key) => ({
-      key,
-      label: ragParamLabels[key] || key,
-      left: formatSettingValue(left[key]),
-      right: formatSettingValue(right[key]),
-    }))
-}
-
-
-
-
-
-function agentTaskTitle() {
-  return '端到端 RAG 修复工作流'
-}
-
-function validateAgentTask() {
-  if (!agentForm.trace_id && !agentForm.eval_run_id) {
-    return '请先选择失败问答 Trace 或 Baseline Eval Run。'
-  }
-  return ''
-}
-
-async function confirmRunAgent() {
-  const validationMessage = validateAgentTask()
-  if (validationMessage) {
-    actionError.value = validationMessage
-    return false
-  }
-  try {
-    await ElMessageBox.confirm(
-      `即将启动：${agentTaskTitle()}。Agent 会读取当前选择的 Trace / Eval Run，生成诊断、优化方案和需要人工确认的动作。`,
-      '确认启动 RAG 修复工作流？',
-      {
-        confirmButtonText: '确认执行',
-        cancelButtonText: '再检查一下',
-        type: 'warning',
-      },
-    )
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function runAgent() {
-  if (!selectedKb.value || !agentForm.message.trim()) return
-  const shouldRun = await confirmRunAgent()
-  if (!shouldRun) return
-  await runAction(async () => {
-    busy.agent = true
-    completedAgentActions.value = new Set()
-    agentResult.value = await api.runRagopsAgent({
-      kb: selectedKb.value.id,
-      trace: agentForm.trace_id,
-      eval_run: agentForm.eval_run_id,
-      compare_eval_run: agentForm.compare_eval_run_id,
-      thread_id: ensureAgentThreadId(),
-      message: agentForm.message,
-    })
-    currentAgentThreadId.value = agentResult.value?.thread_id || currentAgentThreadId.value
-    agentForm.thread_id = currentAgentThreadId.value
-    activeExperimentPlan.value = agentResult.value?.experiment_plan || null
-    await loadAgentActions()
-  })
-  busy.agent = false
-}
-
-async function loadModelUsage() {
-  if (!selectedKb.value) {
-    modelUsage.value = null
-    agentResult.value = null
-    agentActions.value = []
-    return
-  }
-  modelUsage.value = await api.getModelUsageSummary({ kb: selectedKb.value.id })
-}
-
-async function loadAgentActions() {
-  if (!selectedKb.value) {
-    agentActions.value = []
-    return
-  }
-  agentActions.value = await api.listAgentActions({ kb: selectedKb.value.id })
-}
-
-async function loadTraceHistory() {
-  if (!selectedKb.value) {
-    traceHistory.value = []
-    selectedTraceIds.value = []
-    evalRuns.value = []
-    selectedEvalRun.value = null
-    selectedEvalRunIds.value = []
-    benchmarkCases.value = []
-    modelUsage.value = null
-    return
-  }
-  const traces = await api.listTraces({ kb: selectedKb.value.id, question: traceSearch.value })
-  traceHistory.value = await Promise.all(
-    traces.map(async (trace) => {
-      const existing = traceHistory.value.find((item) => item.id === trace.id)
-      return existing && existing.vector_results ? existing : trace
-    })
-  )
-  selectedTraceIds.value = selectedTraceIds.value.filter((id) => traceHistory.value.some((trace) => trace.id === id))
-}
-
-async function openTrace(trace) {
-  const detail = trace.vector_results ? trace : await api.getTrace(trace.id)
-  latestTrace.value = detail
-  traceHistory.value = traceHistory.value.map((item) => (item.id === detail.id ? detail : item))
-}
-
-async function loadEvalRuns() {
-  if (!selectedKb.value) {
-    evalRuns.value = []
-    selectedEvalRun.value = null
-    selectedEvalRunIds.value = []
-    benchmarkCases.value = []
-    return
-  }
-  busy.evalLoad = true
-  try {
-    evalRuns.value = await api.listEvalRuns({ kb: selectedKb.value.id })
-    if (selectedEvalRun.value && !evalRuns.value.some((run) => run.id === selectedEvalRun.value.id)) {
-      selectedEvalRun.value = null
-    }
-    selectedEvalRunIds.value = selectedEvalRunIds.value.filter((id) => evalRuns.value.some((run) => run.id === id))
-    const runningRun = evalRuns.value.find((run) => run.status === 'running')
-    if (runningRun) {
-      startEvalPolling(runningRun.id)
-    }
-  } finally {
-    busy.evalLoad = false
-  }
 }
 
 function parseLooseList(value) {
@@ -1073,19 +726,6 @@ function buildThresholds() {
   if (benchmarkForm.maxTotalTokens > 0) thresholds.max_total_tokens = benchmarkForm.maxTotalTokens
   if (benchmarkForm.maxLatencyMs > 0) thresholds.max_latency_ms = benchmarkForm.maxLatencyMs
   return thresholds
-}
-
-async function loadBenchmarkCases() {
-  if (!selectedKb.value) {
-    benchmarkCases.value = []
-    return
-  }
-  busy.datasetRefresh = true
-  try {
-    benchmarkCases.value = await api.listBenchmarkCases({ kb: selectedKb.value.id, suite: selectedDatasetSuite.value })
-  } finally {
-    busy.datasetRefresh = false
-  }
 }
 
 function resetBenchmarkForm() {
@@ -1163,142 +803,6 @@ async function createBenchmarkCase() {
   }
 }
 
-function agentActionBusyKey(card) {
-  if (!card) return ''
-  if (card.action_id) return `action-${card.action_id}`
-  return card.action_type || card.action_uid ? `action-${card.id}` : `card-${card.id}`
-}
-
-function agentActionCompletionKey(card) {
-  if (!card) return ''
-  if (card.action_id) return `action-${card.action_id}`
-  return card.action_type || card.action_uid ? `action-${card.id}` : `card-${card.id}`
-}
-
-async function confirmAgentAction(card) {
-  const actionId = card?.action_id || card?.id
-  if (!actionId) return
-  try {
-    await ElMessageBox.confirm(
-      `${card.description || ''}\n\n确认后将执行这条已审计的 Agent 动作。`,
-      card.title || '确认执行 Agent 动作？',
-      {
-        confirmButtonText: '确认执行',
-        cancelButtonText: '取消',
-        type: 'warning',
-      },
-    )
-  } catch {
-    return
-  }
-  const busyId = agentActionBusyKey(card)
-  busy.agentAction = busyId
-  try {
-    const updated = await api.confirmAgentAction(actionId)
-    selectedDatasetSuite.value = 'regression'
-    await loadBenchmarkCases()
-    await loadAgentActions()
-    if (agentResult.value?.action_cards?.length) {
-      agentResult.value.action_cards = agentResult.value.action_cards.map((item) =>
-        item.action_id === updated.id
-          ? { ...item, status: updated.status, created_case_id: updated.created_case_id, result: updated.result }
-          : item
-      )
-    }
-    if (updated.status === 'completed') {
-      const next = new Set(completedAgentActions.value)
-      next.add(agentActionCompletionKey(card))
-      completedAgentActions.value = next
-    }
-    if (updated.action_type === 'run_experiment_plan' && updated.result?.plan_id) {
-      activeExperimentPlan.value = await api.getExperimentPlan(updated.result.plan_id)
-      pollExperimentPlan(updated.result.plan_id)
-    }
-    notice.value = `Agent 动作${actionStatusText(updated)}：${updated.created_case_id || updated.result?.plan_id || displayActionTitle(updated)}`
-  } finally {
-    busy.agentAction = ''
-  }
-}
-
-
-
-async function refreshExperimentPlan(planId = activeExperimentPlan.value?.id) {
-  if (!planId) return
-  activeExperimentPlan.value = await api.getExperimentPlan(planId)
-  return activeExperimentPlan.value
-}
-
-async function pollExperimentPlan(planId) {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    const plan = await refreshExperimentPlan(planId)
-    if (!plan || ['completed', 'failed'].includes(plan.status)) {
-      if (plan?.status === 'completed') {
-        await loadEvalRuns()
-        notice.value = `实验计划 #${plan.id} 已完成，推荐 Winner：${plan.recommendation?.winner_name || '-'}`
-      }
-      return
-    }
-    await sleep(3000)
-  }
-}
-
-function hasDiagnosis(diagnosis) {
-  return Boolean(diagnosis && (diagnosis.summary || diagnosis.failure_signals?.length || diagnosis.recommendations?.length))
-}
-
-function diagnosisSeverityText(severity) {
-  const map = {
-    high: '高风险',
-    medium: '中风险',
-    low: '低风险',
-    info: '观察',
-  }
-  return map[severity] || '观察'
-}
-
-function diagnosisSeverityClass(severity) {
-  return severity || 'info'
-}
-
-function displayActionTitle(action) {
-  const title = action?.title || ''
-  const map = {
-    'Create Regression Case': '创建 Regression Case',
-    'Create Regression Case from Failure': '从失败样例创建 Regression Case',
-  }
-  return map[title] || title
-}
-
-function displayActionSource(source) {
-  const map = {
-    trace: 'Trace',
-    eval_failure: '评测失败',
-  }
-  return map[source] || source || '-'
-}
-
-function isAgentCardDone(card) {
-  return completedAgentActions.value.has(agentActionCompletionKey(card)) || card?.status === 'completed'
-}
-
-function actionStatusText(action) {
-  if (!action) return '-'
-  if (action.status === 'completed') return `已完成${action.created_case_id ? ` -> ${action.created_case_id}` : ''}`
-  if (action.status === 'failed') return '失败'
-  if (action.status === 'rejected') return '已拒绝'
-  return '待确认'
-}
-
-function actionFailureSignals(card) {
-  return card?.failure_signals || card?.payload?.failure_signals || []
-}
-
-function actionCardMeta(card) {
-  if (card?.source === 'trace') return `Trace #${card.payload?.trace || '-'}`
-  if (card?.source === 'eval_failure') return `Eval Case Result #${card.payload?.eval_case || '-'}`
-  return card?.source || ''
-}
-
 async function createCaseFromTrace(trace) {
   if (!trace?.id) return
   await runAction(async () => {
@@ -1374,149 +878,10 @@ async function deleteBenchmarkCase(item) {
   }
 }
 
-function buildEvalRunComparison(left, right) {
-  if (!left?.case_results || !right?.case_results) return null
-  const metricNames = Array.from(new Set([...(left.metrics || []), ...(right.metrics || [])]))
-  const rightCaseMap = new Map((right.case_results || []).map((item) => [item.case_id, item]))
-  return {
-    metricDeltas: metricNames.map((metric) => {
-      const leftScore = numberOrNull(left.mean_scores?.[metric])
-      const rightScore = numberOrNull(right.mean_scores?.[metric])
-      return {
-        metric,
-        left: leftScore,
-        right: rightScore,
-        delta: deltaScore(leftScore, rightScore),
-      }
-    }),
-    retrievalMetricDeltas: compareRetrievalMetrics(left.retrieval_metrics || {}, right.retrieval_metrics || {}),
-    settingsChanged: diffSettings(left.settings || {}, right.settings || {}),
-    caseDeltas: (left.case_results || [])
-      .map((leftCase) => {
-        const rightCase = rightCaseMap.get(leftCase.case_id)
-        if (!rightCase) return null
-        return {
-          case_id: leftCase.case_id,
-          question: rightCase.question || leftCase.question,
-          metrics: metricNames.map((metric) => {
-            const leftScore = numberOrNull(leftCase.scores?.[metric])
-            const rightScore = numberOrNull(rightCase.scores?.[metric])
-            return {
-              metric,
-              left: leftScore,
-              right: rightScore,
-              delta: deltaScore(leftScore, rightScore),
-            }
-          }),
-        }
-      })
-      .filter(Boolean),
-  }
-}
-
-async function openEvalRun(run) {
-  busy.evalDetail = run.id
-  try {
-    const detail = run.case_results ? run : await api.getEvalRun(run.id)
-    selectedEvalRun.value = detail
-    evalRuns.value = evalRuns.value.map((item) => (item.id === detail.id ? detail : item))
-    if (detail.baseline_run && !selectedBaselineEvalRunId.value) {
-      selectedBaselineEvalRunId.value = detail.baseline_run
-    }
-  } finally {
-    busy.evalDetail = ''
-  }
-}
-
-async function setBaselineEvalRun(run) {
-  if (!run?.id) return
-  if (!run.case_results) await openEvalRun(run)
-  selectedBaselineEvalRunId.value = run.id
-  notice.value = `已设置 Baseline Run #${run.id}（${run.param_signature || 'no-signature'}）`
-}
-
-async function compareEvalRunWithBaseline(run) {
-  if (!run?.id || !selectedBaselineEvalRunId.value || selectedBaselineEvalRunId.value === run.id) return
-  const baseline = evalRuns.value.find((item) => item.id === selectedBaselineEvalRunId.value)
-  if (!baseline) return
-  if (!baseline.case_results) await openEvalRun(baseline)
-  if (!run.case_results) await openEvalRun(run)
-  selectedEvalRunIds.value = [selectedBaselineEvalRunId.value, run.id]
-}
-
-async function toggleEvalRunCompare(run) {
-  let ids = [...selectedEvalRunIds.value]
-  if (ids.includes(run.id)) {
-    ids = ids.filter((id) => id !== run.id)
-  } else {
-    ids = [...ids.slice(-1), run.id]
-    if (!run.case_results) await openEvalRun(run)
-  }
-  selectedEvalRunIds.value = ids
-  await Promise.all(
-    ids.map(async (id) => {
-      const runItem = evalRuns.value.find((item) => item.id === id)
-      if (runItem && !runItem.case_results) await openEvalRun(runItem)
-    })
-  )
-}
-
-async function runEval() {
-  if (!selectedKb.value || isEvalRunning.value) return
-  await runAction(async () => {
-    busy.eval = true
-    notice.value = 'RAGAS 评测正在运行，完成后会自动展示报告'
-    const startedRun = await api.runEval({
-      kb: selectedKb.value.id,
-      suite: selectedEvalSuite.value,
-      baseline_run: selectedBaselineEvalRunId.value || undefined,
-      rag_options: { ...ragOptions },
-    })
-    selectedEvalRun.value = startedRun
-    evalRuns.value = [startedRun, ...evalRuns.value.filter((run) => run.id !== startedRun.id)]
-    startEvalPolling(startedRun.id)
-  })
-}
-
-async function startEvalPolling(id) {
-  if (pollingEvalRunIds.value.has(id)) return
-  pollingEvalRunIds.value = new Set([...pollingEvalRunIds.value, id])
-  busy.eval = true
-  try {
-    const result = await pollEvalRun(id)
-    await loadEvalRuns()
-    selectedEvalRun.value = result
-    notice.value = `评测完成：RAGAS Run #${result.id}`
-  } catch (err) {
-    actionError.value = err.message
-  } finally {
-    const next = new Set(pollingEvalRunIds.value)
-    next.delete(id)
-    pollingEvalRunIds.value = next
-    busy.eval = pollingEvalRunIds.value.size > 0
-  }
-}
-
-async function pollEvalRun(id) {
-  let intervalMs = 3000
-  const maxIntervalMs = 10000
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    const run = await api.getEvalRun(id)
-    selectedEvalRun.value = run
-    evalRuns.value = evalRuns.value.map((item) => (item.id === run.id ? run : item))
-    if (run.status === 'completed') return run
-    if (run.status === 'failed') throw new Error(run.error_message || 'RAGAS 评测失败')
-    const waitMs = document.hidden ? Math.max(intervalMs, 15000) : intervalMs
-    await sleep(waitMs)
-    if (!document.hidden) {
-      intervalMs = Math.min(Math.round(intervalMs * 1.5), maxIntervalMs)
-    }
-  }
-  throw new Error('RAGAS 评测仍在运行，请稍后刷新评测报告')
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
+async function openTrace(trace) {
+  const detail = trace.vector_results ? trace : await api.getTrace(trace.id)
+  latestTrace.value = detail
+  traceHistory.value = traceHistory.value.map((item) => (item.id === detail.id ? detail : item))
 }
 
 async function toggleTraceCompare(trace) {
@@ -1574,17 +939,14 @@ async function resetWorkspace() {
     selectedDocument.value = null
     chunks.value = []
     Object.keys(stats).forEach((key) => delete stats[key])
-    messages.value = []
-    session.value = null
+    resetChatState()
     latestTrace.value = null
     traceHistory.value = []
     selectedTraceIds.value = []
-    evalRuns.value = []
-    selectedEvalRun.value = null
-    selectedEvalRunIds.value = []
+    resetEvalState()
     benchmarkCases.value = []
     modelUsage.value = null
-    agentResult.value = null
+    resetAgentState()
     notice.value = `已重置：知识库 ${result.deleted.knowledge_bases} 个，文档 ${result.deleted.documents} 个，切片 ${result.deleted.chunks} 个，会话 ${result.deleted.chat_sessions} 个`
     await loadKbs()
     documents.value = await api.listDocuments()
@@ -1622,24 +984,18 @@ function selectKb(kb) {
   selectedKb.value = kb
   selectedDocument.value = null
   chunks.value = []
-  messages.value = []
-  session.value = null
-  chatSessions.value = []
+  resetChatState()
   latestTrace.value = null
   selectedTraceIds.value = []
-  evalRuns.value = []
-  selectedEvalRun.value = null
-  selectedEvalRunIds.value = []
+  resetEvalState()
   benchmarkCases.value = []
-  agentActions.value = []
-  chatSessions.value = []
+  resetAgentState()
   loadTraceHistory()
   loadEvalRuns()
   loadBenchmarkCases()
   loadModelUsage()
   loadAgentActions()
   loadChatSessions({ restore: true })
-  agentResult.value = null
 }
 
 function selectDocument(doc) {
@@ -1685,161 +1041,6 @@ async function indexDoc() {
     await preview()
   })
   busy.index = false
-}
-
-function lastSessionStorageKey(kbId = selectedKb.value?.id) {
-  return kbId ? `aiassistant:last-session:${kbId}` : ''
-}
-
-function rememberSession(sessionId, kbId = selectedKb.value?.id) {
-  const key = lastSessionStorageKey(kbId)
-  if (key && sessionId) localStorage.setItem(key, String(sessionId))
-}
-
-async function loadChatSessions({ restore = false } = {}) {
-  if (!selectedKb.value) {
-    chatSessions.value = []
-    return
-  }
-  chatSessions.value = await api.listSessions({ kb: selectedKb.value.id })
-  if (session.value?.id) {
-    const refreshedCurrent = chatSessions.value.find((item) => item.id === session.value.id)
-    if (refreshedCurrent) session.value = refreshedCurrent
-  }
-  if (!restore) return
-  const savedId = Number(localStorage.getItem(lastSessionStorageKey()) || 0)
-  const target = chatSessions.value.find((item) => item.id === savedId) || chatSessions.value[0]
-  if (target) {
-    await selectChatSession(target, { remember: false })
-  }
-}
-
-async function selectChatSessionById(value) {
-  const id = Number(value)
-  const target = chatSessions.value.find((item) => item.id === id)
-  if (target) await selectChatSession(target)
-}
-
-async function selectChatSession(item, { remember = true } = {}) {
-  session.value = item
-  messages.value = await api.listMessages(item.id)
-  if (remember) rememberSession(item.id, item.kb)
-}
-
-async function deleteChatSession(item) {
-  if (!item?.id) return
-  try {
-    await ElMessageBox.confirm(
-      '删除后该会话的消息、Trace 和反馈记录也会一并删除。',
-      `确认删除会话 #${item.id}？`,
-      {
-        confirmButtonText: '删除',
-        cancelButtonText: '取消',
-        type: 'warning',
-        confirmButtonClass: 'el-button--danger',
-      },
-    )
-  } catch {
-    return
-  }
-  await runAction(async () => {
-    await api.deleteSession(item.id)
-    const deletedCurrent = session.value?.id === item.id
-    chatSessions.value = chatSessions.value.filter((sessionItem) => sessionItem.id !== item.id)
-    if (String(localStorage.getItem(lastSessionStorageKey(item.kb))) === String(item.id)) {
-      localStorage.removeItem(lastSessionStorageKey(item.kb))
-    }
-    if (deletedCurrent) {
-      const nextSession = chatSessions.value[0] || null
-      session.value = nextSession
-      messages.value = nextSession ? await api.listMessages(nextSession.id) : []
-      latestTrace.value = null
-      if (nextSession) rememberSession(nextSession.id, nextSession.kb)
-    }
-    await loadTraceHistory()
-    await loadModelUsage()
-    notice.value = `已删除会话 #${item.id}`
-  })
-}
-
-function chatSessionLabel(item) {
-  const count = item.message_count ?? 0
-  return `#${item.id} · ${item.display_title || item.title || 'RAG 问答'} · ${count} 条`
-}
-
-async function newSession() {
-  session.value = await api.createSession({ kb: selectedKb.value.id, title: 'RAG 问答' })
-  messages.value = []
-  rememberSession(session.value.id)
-  await loadChatSessions()
-  notice.value = '已创建新会话'
-}
-
-async function ask() {
-  if (!question.value.trim() || !selectedKb.value) return
-  if (!session.value) {
-    session.value = await api.createSession({ kb: selectedKb.value.id, title: 'RAG 问答' })
-  }
-  const userMessage = { id: `local-${Date.now()}`, role: 'user', content: question.value, sources: [] }
-  messages.value.push(userMessage)
-  const content = question.value
-  question.value = ''
-  const assistantMessage = {
-    id: `stream-${Date.now()}`,
-    role: 'assistant',
-    content: '',
-    sources: [],
-  }
-  messages.value.push(assistantMessage)
-  loading.value = true
-  try {
-    await api.streamMessage(session.value.id, content, { ...ragOptions }, {
-      onSources: (sources) => {
-        assistantMessage.sources = sources
-      },
-      onTrace: (trace) => {
-        latestTrace.value = trace
-      },
-      onDelta: (delta) => {
-        assistantMessage.content += delta
-      },
-      onDone: (message) => {
-        Object.assign(assistantMessage, message)
-        latestTrace.value = message.trace || latestTrace.value
-        loadTraceHistory()
-        loadModelUsage()
-        loadChatSessions().then(() => {
-          if (session.value?.id) rememberSession(session.value.id)
-        })
-      },
-      onError: (data) => {
-        throw new Error(data.detail || 'Stream failed')
-      },
-    })
-  } catch (err) {
-    actionError.value = err.message
-    if (!assistantMessage.content) {
-      messages.value = messages.value.filter((message) => message.id !== assistantMessage.id)
-    }
-  } finally {
-    loading.value = false
-  }
-}
-
-async function runAction(fn) {
-  actionError.value = ''
-  notice.value = ''
-  try {
-    await fn()
-  } catch (err) {
-    actionError.value = err.message
-  } finally {
-    busy.preview = false
-    busy.index = false
-    busy.upload = false
-    busy.reset = false
-    busy.eval = false
-  }
 }
 
 onBeforeUnmount(() => {

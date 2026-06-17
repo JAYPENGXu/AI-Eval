@@ -15,7 +15,6 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
@@ -577,6 +576,8 @@ class RagAgentActionViewSet(viewsets.ReadOnlyModelViewSet):
         action_obj = self.get_object()
         if action_obj.status == "completed":
             return Response(RagAgentActionSerializer(action_obj).data)
+        if action_obj.status == "running":
+            return Response({"detail": "Action is still running."}, status=status.HTTP_409_CONFLICT)
         if action_obj.status == "rejected":
             return Response({"detail": "Rejected actions cannot be confirmed."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -589,11 +590,10 @@ class RagAgentActionViewSet(viewsets.ReadOnlyModelViewSet):
             if action_obj.action_type == "run_experiment_plan":
                 plan_id = action_obj.payload.get("experiment_plan")
                 plan = start_experiment_plan(user=request.user, plan_id=int(plan_id))
-                action_obj.status = "completed"
-                action_obj.completed_at = timezone.now()
+                action_obj.status = "running"
                 action_obj.result = {"plan_id": plan.id, "status": plan.status, "variant_count": plan.variants.count()}
                 action_obj.error_message = ""
-                action_obj.save(update_fields=["status", "completed_at", "result", "error_message", "updated_at"])
+                action_obj.save(update_fields=["status", "result", "error_message", "updated_at"])
                 return Response(RagAgentActionSerializer(action_obj).data)
 
             if action_obj.action_type != "create_regression_case":
@@ -683,15 +683,9 @@ class RagBenchmarkCaseViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        kb = serializer.validated_data["kb"]
-        if kb.owner_id != self.request.user.id:
-            raise PermissionDenied("Knowledge base not found.")
         serializer.save()
 
     def perform_update(self, serializer):
-        kb = serializer.validated_data.get("kb") or serializer.instance.kb
-        if kb.owner_id != self.request.user.id:
-            raise PermissionDenied("Knowledge base not found.")
         serializer.save()
 
 

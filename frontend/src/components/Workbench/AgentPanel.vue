@@ -175,8 +175,8 @@
                 </ul>
                 <small>{{ actionCardMeta(card) }}</small>
               </div>
-              <el-button type="primary" @click="$emit('confirm-action', card)" :disabled="busy.agentAction || isAgentCardDone(card)" :loading="busy.agentAction === actionBusyKey(card)">
-                {{ isAgentCardDone(card) ? '已完成' : (busy.agentAction === actionBusyKey(card) ? '执行中' : card.confirm_label || '确认') }}
+              <el-button type="primary" @click="$emit('confirm-action', card)" :disabled="!!busy.agentAction || isAgentCardDone(card)" :loading="isAgentCardRunning(card)">
+                {{ isAgentCardDone(card) ? '已完成' : (isAgentCardRunning(card) ? '执行中' : card.confirm_label || '确认') }}
               </el-button>
             </article>
           </section>
@@ -221,10 +221,10 @@
                 <el-button
                   type="primary"
                   @click="$emit('confirm-action', action)"
-                  :disabled="busy.agentAction"
+                  :disabled="!!busy.agentAction || action.status === 'completed' || action.status === 'running'"
                   :loading="busy.agentAction === `action-${action.id}`"
                 >
-                  {{ busy.agentAction === `action-${action.id}` ? '执行中' : (action.confirm_label || '确认') }}
+                  {{ busy.agentAction === `action-${action.id}` ? '执行中' : (action.status === 'running' ? '执行中' : (action.confirm_label || '确认')) }}
                 </el-button>
               </article>
             </div>
@@ -259,14 +259,15 @@
                     <small v-if="action.error_message">错误：{{ action.error_message }}</small>
                   </div>
                   <el-button
-                    v-if="action.status !== 'completed' && action.status !== 'rejected'"
+                    v-if="action.status !== 'completed' && action.status !== 'rejected' && action.status !== 'running'"
                     type="primary"
                     @click="$emit('confirm-action', action)"
-                    :disabled="busy.agentAction"
+                    :disabled="!!busy.agentAction"
                     :loading="busy.agentAction === `action-${action.id}`"
                   >
                     {{ busy.agentAction === `action-${action.id}` ? '执行中' : '确认' }}
                   </el-button>
+                  <span v-else-if="action.status === 'running'" class="status-pill">执行中</span>
                   <span v-else class="status-pill">{{ actionStatusText(action) }}</span>
                 </article>
                 <el-button
@@ -310,6 +311,7 @@ const props = defineProps({
   actionFailureSignals: { type: Function, required: true },
   actionCardMeta: { type: Function, required: true },
   isAgentCardDone: { type: Function, required: true },
+  isAgentCardRunning: { type: Function, required: true },
   displayActionTitle: { type: Function, required: true },
   actionStatusText: { type: Function, required: true },
 })
@@ -339,14 +341,14 @@ const auditFilters = [
 ]
 
 const pendingAgentActions = computed(() =>
-  (props.agentActions || []).filter((action) => action.status === 'pending' || action.status === 'failed')
+  (props.agentActions || []).filter((action) => ['pending', 'failed', 'running'].includes(action.status))
 )
 
 const filteredAuditActions = computed(() => {
   const actions = props.agentActions || []
   if (auditStatusFilter.value === 'all') return actions
   if (auditStatusFilter.value === 'pending') {
-    return actions.filter((action) => action.status === 'pending' || action.status === 'failed')
+    return actions.filter((action) => ['pending', 'failed', 'running'].includes(action.status))
   }
   return actions.filter((action) => action.status === auditStatusFilter.value)
 })
@@ -374,11 +376,6 @@ function signedNumber(value) {
   const number = Number(value)
   if (Number.isNaN(number)) return String(value)
   return `${number >= 0 ? '+' : ''}${number}`
-}
-
-function actionBusyKey(card) {
-  if (!card) return ""
-  return card.action_id ? `action-${card.action_id}` : `card-${card.id}`
 }
 
 defineEmits(['quick-task', 'run-agent', 'confirm-action', 'refresh-experiment-plan', 'new-agent-thread', 'update:collapse-value'])

@@ -253,7 +253,37 @@ def refresh_experiment_plan(plan: RagExperimentPlan) -> RagExperimentPlan:
     plan.status = "completed" if all(v.eval_run and v.eval_run.status == "completed" for v in variants) else "failed"
     plan.completed_at = timezone.now()
     plan.save(update_fields=["status", "winner_variant", "recommendation", "completed_at", "updated_at"])
+    finalize_experiment_plan_action(plan)
     return plan
+
+
+def finalize_experiment_plan_action(plan: RagExperimentPlan) -> None:
+    from .models import RagAgentAction
+
+    action = (
+        RagAgentAction.objects.filter(
+            action_type="run_experiment_plan",
+            payload__experiment_plan=plan.id,
+            status="running",
+        )
+        .order_by("-updated_at")
+        .first()
+    )
+    if not action:
+        return
+    action.status = "completed" if plan.status == "completed" else "failed"
+    action.completed_at = timezone.now()
+    action.result = {
+        **(action.result or {}),
+        "plan_id": plan.id,
+        "status": plan.status,
+        "winner_name": (plan.recommendation or {}).get("winner_name"),
+    }
+    if plan.status == "failed":
+        action.error_message = action.error_message or "实验计划执行失败，请刷新计划查看各 Variant 状态。"
+    else:
+        action.error_message = ""
+    action.save(update_fields=["status", "completed_at", "result", "error_message", "updated_at"])
 
 
 def summarize_variant(baseline: RagEvalRun, run: RagEvalRun | None) -> dict:
