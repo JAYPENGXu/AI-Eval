@@ -20,6 +20,7 @@ from rest_framework.response import Response
 
 from .agent.services import run_ragops_agent
 from .case_factory import create_regression_case_from_eval_case, create_regression_case_from_trace, create_regression_case_from_user_feedback
+from .eval_runs import reconcile_stale_eval_run, reconcile_stale_eval_runs
 from .experiments import refresh_experiment_plan, start_experiment_plan
 from .chunkers import list_chunk_methods
 from .models import (
@@ -790,6 +791,19 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(status=status_value)
         return queryset
 
+    def list(self, request, *args, **kwargs):
+        kb_id = request.query_params.get("kb")
+        reconcile_stale_eval_runs(
+            owner=request.user,
+            kb_id=int(kb_id) if kb_id else None,
+        )
+        return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = reconcile_stale_eval_run(self.get_object())
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
     @action(detail=False, methods=["post"], url_path="run")
     def run(self, request):
         kb_id = request.data.get("kb") or request.data.get("kb_id")
@@ -842,6 +856,8 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
             baseline_run = RagEvalRun.objects.filter(id=baseline_run_id, kb=kb).first()
             if not baseline_run:
                 return Response({"detail": "Baseline run not found in this knowledge base."}, status=status.HTTP_404_NOT_FOUND)
+
+        reconcile_stale_eval_runs(owner=request.user, kb_id=kb.id)
 
         eval_run = RagEvalRun.objects.create(
             kb=kb,

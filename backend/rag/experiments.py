@@ -8,7 +8,7 @@ from django.core.management import call_command
 from django.db import close_old_connections
 from django.utils import timezone
 
-from .models import KnowledgeBase, RagAgentAction, RagEvalRun, RagExperimentPlan, RagExperimentVariant
+from .eval_runs import reconcile_stale_eval_run
 
 DEFAULT_METRICS = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
 
@@ -232,7 +232,11 @@ def refresh_experiment_plan(plan: RagExperimentPlan) -> RagExperimentPlan:
     variants = list(plan.variants.all())
     if not variants or any(not variant.eval_run_id for variant in variants):
         return plan
-    if any(variant.eval_run.status == "running" for variant in variants if variant.eval_run):
+    for variant in variants:
+        if variant.eval_run:
+            reconcile_stale_eval_run(variant.eval_run)
+    variants = list(plan.variants.select_related("eval_run").all())
+    if any(variant.eval_run and variant.eval_run.status == "running" for variant in variants):
         return plan
 
     for variant in variants:
