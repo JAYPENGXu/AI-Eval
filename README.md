@@ -14,51 +14,27 @@ AIAssistant 是一个面向 RAGOps 的知识库问答、调试、评测和 Agent
 
 ## 当前能力地图
 
-```mermaid
-flowchart TB
-    U["用户 / 专家 / 开发者"] --> FE["Vue + Element Plus 前端"]
-    FE --> API["Django REST API"]
-    API --> DB[("SQLite\n业务数据 / Trace / Eval / Agent Action")]
-    API --> VDB[("Milvus Lite\nVector Index")]
-    API --> LLM["OpenAI-compatible LLM\nQwen / DeepSeek / DashScope"]
-    API --> CP[("LangGraph SQLite Checkpoint\nAgent Thread State")]
+![AIAssistant RAGOps 当前能力地图](docs/assets/ragops_architecture.png)
 
-    subgraph RAG["一期：RAG 问答与调试闭环"]
-      Q["原始问题"] --> QR["Query Router\ninternal_knowledge / web_required"]
-      QR --> MEM["Conversation Memory\nSession Summary + Recent Turns"]
-      MEM --> CR["多轮会话改写\nConversational Rewrite"]
-      CR --> RW["检索 Query Rewrite\nnone / rule / llm"]
-      RW --> VS["Vector Search"]
-      RW --> BM["BM25 Search"]
-      VS --> HY["Hybrid Fusion / RRF"]
-      BM --> HY
-      HY --> RR["Rerank"]
-      RR --> CC["Context Compression"]
-      CC --> FP["Final Prompt"]
-      FP --> ANS["SSE 流式回答"]
-      ANS --> TR["RagTrace"]
-    end
+## 核心闭环详解
 
-    subgraph EVAL["一期：评测与回归闭环"]
-      CASE["Benchmark / Regression Case"] --> RUN["Eval Run"]
-      RUN --> RES["Case Result / Failure Analysis"]
-      RES --> REG["沉淀 Regression Set"]
-    end
+### RAG 问答与可观测链路
 
-    subgraph AGENT["二期：RAGOps Agent 工作流"]
-      FAIL["失败 Trace / Baseline Eval Run"] --> PLAN["LangGraph 规划"]
-      PLAN --> DIAG["诊断失败阶段"]
-      DIAG --> PROP["生成优化方案"]
-      PROP --> INT["human_decision interrupt"]
-      INT --> HITL["HITL Action Card"]
-      HITL --> RESUME["resume + action_executor"]
-      RESUME --> EXP["创建回归样例 / 运行实验"]
-    end
+这条链路展示一次知识库问答从用户问题进入系统后，如何经过 Query Router、会话记忆、Query Rewrite、Vector/BM25/Hybrid/Rerank、上下文压缩和最终 Prompt，并把每个阶段写入 Trace，支撑后续调试、评测和回归。
 
-    API --> RAG
-    API --> EVAL
-    API --> AGENT
-```
+![RAG 问答与可观测链路](docs/assets/rag_pipeline_observability.png)
+
+### 评测与回归闭环
+
+评测闭环展示专家 Eval Case 如何按 suite 运行，结合 RAGAS、deterministic checks 和 LLM-as-Judge 生成 Case Result 与 Failure Analysis，再把失败样例、坏 Trace 和用户负反馈沉淀为 Regression Suite，驱动下一轮优化。
+
+![评测与回归闭环](docs/assets/evaluation_regression_loop.png)
+
+### RAGOps Agent 修复闭环
+
+Agent 修复闭环展示系统如何围绕失败 Trace 或 Baseline Eval Run 收集证据、诊断失败阶段、生成优化方案，并通过 Human-in-the-loop Action Card 审批后创建回归样例或运行参数实验计划，形成可审计的自动化修复流程。
+
+![RAGOps Agent 修复闭环](docs/assets/ragops_agent_repair_loop.png)
 
 ## 技术栈
 
