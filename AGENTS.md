@@ -39,7 +39,15 @@ document upload
 - `backend/`: Django + Django REST Framework backend.
 - `backend/assistant_backend/settings.py`: project settings and environment variables.
 - `backend/rag/`: RAG domain models, API views, retrieval logic, evaluation, and management commands.
-- `backend/rag/services.py`: main RAG question-answering pipeline.
+- `backend/rag/services.py`: RAG pipeline facade (re-exports from split modules).
+- `backend/rag/chat_pipeline.py`: main Q&A orchestration.
+- `backend/rag/retrieval.py`: vector/BM25/hybrid/rerank retrieval.
+- `backend/rag/indexing.py`: document chunking and indexing.
+- `backend/rag/session_memory.py`: ChatSessionSummary generation.
+- `backend/rag/hybrid.py`: RRF fusion.
+- `backend/rag/eval_runs.py`: stale Eval Run detection and reconciliation.
+- `backend/rag/tests/`: pytest core-path tests (RRF, query_router).
+- `backend/rag/agent/actions.py`: shared RagAgentAction execution logic.
 - `backend/rag/query_router.py`: lightweight internal knowledge vs web-required route decision.
 - `backend/rag/query_rewrite.py`: retrieval query rewrite logic.
 - `backend/rag/agent/`: LangGraph RAGOps Agent workflow.
@@ -50,7 +58,10 @@ document upload
 - `frontend/`: Vue 3 + Vite + Element Plus frontend.
 - `frontend/src/App.vue`: main workbench shell and top-level state.
 - `frontend/src/components/`: frontend panels and reusable components.
-- `frontend/src/api/`: frontend API modules.
+- `frontend/src/api/`: TypeScript API modules.
+- `frontend/src/composables/`: `useAgent`, `useChat`, `useEvalRuns`, polling helpers.
+- `frontend/src/stores/`: Pinia stores (auth).
+- `frontend/src/types/`: shared API TypeScript types.
 - `README.md`: project overview and setup.
 - `一期功能说明.md`: phase-one RAG feature guide.
 - `二期功能说明.md`: phase-two Agent workflow guide.
@@ -96,6 +107,7 @@ CONVERSATION_CONTEXT_TURNS
 SESSION_SUMMARY_ENABLED
 SESSION_SUMMARY_TRIGGER_MESSAGES
 SESSION_SUMMARY_MAX_CHARS
+EVAL_RUN_STALE_TIMEOUT_SECONDS
 LANGGRAPH_CHECKPOINT_DB
 ```
 
@@ -140,6 +152,7 @@ source venv/bin/activate
 python -m compileall rag assistant_backend
 python manage.py check
 python manage.py makemigrations --check --dry-run
+pytest rag/tests -q
 ```
 
 Frontend:
@@ -159,6 +172,15 @@ python manage.py eval_ragas --suite regression
 ```
 
 If dependencies are missing, say so clearly instead of pretending checks passed.
+
+CI (`.github/workflows/backend-tests.yml`) runs compileall, Django checks, makemigrations --check, and pytest on backend changes.
+
+Core-path tests currently cover:
+
+- `backend/rag/tests/test_hybrid.py`: RRF fusion and source merging.
+- `backend/rag/tests/test_query_router.py`: internal_knowledge / web_required / unsupported routing.
+
+When changing RRF, query router, case_factory, or eval stale logic, update or add tests in the same change when reasonable.
 
 ## RAG Pipeline
 
@@ -329,9 +351,9 @@ failed Trace or Baseline Eval Run
 -> collect evidence
 -> diagnose failure stage
 -> propose fixes
--> create HITL Action Card for write operations
--> user confirms
--> create regression case or run experiment
+-> human_decision interrupt (LangGraph checkpoint pause)
+-> user confirms or rejects Action Card
+-> LangGraph resume: action_executor runs write ops -> responder final report
 -> audit result
 ```
 
@@ -339,6 +361,7 @@ LangGraph files:
 
 - `backend/rag/agent/graph.py`
 - `backend/rag/agent/tools.py`
+- `backend/rag/agent/actions.py`
 - `backend/rag/agent/checkpointing.py`
 - `backend/rag/agent/services.py`
 
@@ -357,7 +380,16 @@ Current graph nodes include:
 - diagnostician
 - proposal
 - human decision
+- action executor
 - responder
+
+When `human_decision` creates Action Cards, the graph calls LangGraph `interrupt()` and pauses. Resume uses `Command(resume=...)` with payload `{decision, action_id, reason}`.
+
+Agent run responses include:
+
+- `status`: `interrupted` or `completed`
+- `awaiting_human`: whether the thread is paused for HITL
+- `action_cards`, `diagnosis`, `experiment_plan`, `answer`, `thread_id`
 
 ## HITL And Agent Actions
 
@@ -373,11 +405,12 @@ Use `RagAgentAction` for:
 Statuses:
 
 - `pending`
+- `running`
 - `completed`
 - `failed`
 - `rejected`
 
-Do not let the Agent silently perform write operations from a natural-language response.
+When the Agent thread is `awaiting_human`, confirm/reject on `RagAgentAction` should resume the LangGraph thread instead of executing the write op twice. Fallback direct execution via `execute_agent_action()` remains for actions without an interrupted thread (e.g. user feedback actions).
 
 ## LangGraph Checkpointer
 
@@ -391,10 +424,12 @@ Rules:
 
 - Do not use Django `db.sqlite3` for checkpointer data.
 - Do not commit `backend/agent_state/`.
-- The frontend generates and stores the current Agent thread id.
+- The frontend generates and stores the current Agent thread id per kb/trace/eval/compare business key.
 - Backend passes thread id through `configurable.thread_id`.
 - Thread id should bind to business context such as kb, trace, eval run, and compare run.
-- Full interrupt/resume is not complete yet; do not claim it is.
+- LangGraph native interrupt/resume is implemented: `human_decision` interrupts; confirm/reject or `POST /ragops-agent/resume/` resumes.
+- Frontend can reload interrupted state via `GET /ragops-agent/state/?thread_id=...`.
+- Requires `langgraph-checkpoint-sqlite`; without checkpointer, resume is unavailable.
 
 ## API Notes
 
@@ -411,7 +446,7 @@ Common API areas:
 - evaluation runs: list, detail, run, poll status, compare
 - experiment plans
 - model usage summary
-- RAGOps Agent run
+- RAGOps Agent run / state / resume
 - Agent actions: list, confirm, reject
 - reset workspace
 

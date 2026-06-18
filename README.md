@@ -49,8 +49,10 @@ flowchart TB
       FAIL["失败 Trace / Baseline Eval Run"] --> PLAN["LangGraph 规划"]
       PLAN --> DIAG["诊断失败阶段"]
       DIAG --> PROP["生成优化方案"]
-      PROP --> HITL["Human-in-the-loop Action Card"]
-      HITL --> EXP["确认后运行实验或创建回归样例"]
+      PROP --> INT["human_decision interrupt"]
+      INT --> HITL["HITL Action Card"]
+      HITL --> RESUME["resume + action_executor"]
+      RESUME --> EXP["创建回归样例 / 运行实验"]
     end
 
     API --> RAG
@@ -60,12 +62,12 @@ flowchart TB
 
 ## 技术栈
 
-- 后端：Django、Django REST Framework、SimpleJWT、SQLite。
-- 前端：Vue 3、Vite、Element Plus。
+- 后端：Django、Django REST Framework、SimpleJWT、SQLite、pytest。
+- 前端：Vue 3、Vite 7、Element Plus、Pinia、TypeScript。
 - 检索：Milvus Lite 向量索引、SQLite Chunk 元数据、BM25。
 - RAG：Query Router、Session Summary Memory、Query Rewrite、Hybrid Search、Rerank、Context Compression、SSE Streaming。
 - 评测：RAGAS、轻量后台线程、Eval Run 对比、Failure Analysis。
-- Agent：LangGraph、SQLite checkpointer、HITL Action Card、Agent 审计记录。
+- Agent：LangGraph、SQLite checkpointer、LangGraph 原生 interrupt/resume、HITL Action Card、Agent 审计记录。
 - 模型：通过 `backend/.env` 中的 OpenAI-compatible 配置调用聊天、Embedding、Rerank、Rewrite、Compression。
 
 ## 目录结构
@@ -80,16 +82,29 @@ AIAssistant/
 │   ├── manage.py
 │   ├── assistant_backend/
 │   └── rag/
-│       ├── agent/              # LangGraph RAGOps Agent
+│       ├── agent/              # LangGraph RAGOps Agent（graph / tools / actions / checkpointing）
+│       ├── tests/              # P0 核心路径单元测试（RRF、query_router）
 │       ├── migrations/
-│       ├── services.py         # RAG 主链路
+│       ├── services.py         # RAG 主链路 facade（re-export）
+│       ├── chat_pipeline.py    # 问答编排
+│       ├── retrieval.py        # 检索与 rerank 编排
+│       ├── session_memory.py   # 会话摘要记忆
+│       ├── indexing.py         # 文档切片与索引
+│       ├── hybrid.py           # RRF 融合
+│       ├── query_router.py
 │       ├── query_rewrite.py
+│       ├── eval_runs.py        # Eval Run stale 检测
+│       ├── case_factory.py
 │       ├── experiments.py
 │       └── views.py
 └── frontend/
     ├── src/
-    │   ├── App.vue
-    │   ├── api/
+    │   ├── App.vue             # 工作台壳层
+    │   ├── main.ts
+    │   ├── api/                # TypeScript API 客户端
+    │   ├── composables/        # useAgent / useChat / useEvalRuns 等
+    │   ├── stores/             # Pinia（auth 等）
+    │   ├── types/
     │   └── components/
     └── package.json
 ```
@@ -116,7 +131,9 @@ AIAssistant/
 - 评测集管理：维护 smoke、benchmark、regression、release。
 - 评测报告：保存 RAGAS 分数、Recall@K、Hit Rate、MRR、阶段命中情况。
 - Failure Analysis：定位 rewrite、vector、bm25、hybrid、rerank、compression、answer 等失败阶段。
+- Eval Run stale 检测：长时间 `running` 的评测 Run 自动标记为 `failed`，避免 UI 假死。
 - 回归闭环：从 Trace、Eval Failure、用户负反馈沉淀 Regression Case。
+- 核心路径测试：`pytest` 覆盖 RRF 融合与 Query Router，CI 自动运行（`.github/workflows/backend-tests.yml`）。
 
 详细说明见 [一期功能说明.md](./一期功能说明.md)。
 
@@ -129,19 +146,21 @@ AIAssistant/
 -> Agent 收集证据
 -> 定位失败阶段
 -> 生成优化方案
--> 需要写操作时生成 HITL Action Card
--> 用户确认后创建 Regression Case 或运行参数实验
--> 对比 Baseline，推荐 Winner
+-> human_decision 节点 interrupt（LangGraph checkpoint 暂停）
+-> 用户确认 / 拒绝 Action Card
+-> LangGraph resume：action_executor 执行写操作 -> responder 生成最终报告
+-> 对比 Baseline，推荐 Winner（实验场景）
 ```
 
 当前 Agent 能力：
 
-- LangGraph 编排：planner、tool executor、diagnosis、proposal、human decision、response。
+- LangGraph 编排：planner、tool executor、diagnostician、proposal、human decision、action executor、responder。
+- LangGraph 原生 interrupt/resume：`human_decision` 在创建 Action Card 后 `interrupt()`；confirm/reject 通过 `Command(resume=...)` 恢复图执行。
 - SQLite checkpointer：Agent 状态保存在独立 SQLite 文件，不混用 Django `db.sqlite3`。
-- Thread ID：前端生成并保存 Agent thread id，后端用 `configurable.thread_id` 调用 LangGraph。
+- Thread ID：前端按 kb/trace/eval/compare 绑定 thread id；支持 `GET /state/` 刷新后恢复中断工作流。
 - 轻量状态：Graph state 只保存业务 ID 和必要摘要，不塞大文档、大 chunk 或完整 Trace。
-- HITL：创建回归样例、运行实验等写操作必须先生成 Action Card，用户确认后才执行。
-- 审计：Agent Action 保存状态、结果、错误、来源和创建时间。
+- HITL：创建回归样例、运行实验等写操作必须先生成 Action Card；thread 处于 `awaiting_human` 时，confirm/reject 会触发 graph resume。
+- 审计：`RagAgentAction` 保存状态（含 `running`）、结果、错误、来源和创建时间。
 - 端到端 RAG 修复入口：前端 Agent 页只保留一个主工作流，不再展示松散的伪需求按钮。
 
 详细说明见 [二期功能说明.md](./二期功能说明.md)。
@@ -208,6 +227,8 @@ Session Summary + 最近几轮消息 + 当前问题
 - `/api/rag-user-feedback/`
 - `GET /api/model-usage/summary/`
 - `POST /api/ragops-agent/run/`
+- `GET /api/ragops-agent/state/?thread_id=...`
+- `POST /api/ragops-agent/resume/`
 - `/api/rag-agent-actions/`
 - `POST /api/rag-agent-actions/{id}/confirm/`
 - `POST /api/rag-agent-actions/{id}/reject/`
@@ -258,6 +279,7 @@ CONVERSATION_CONTEXT_TURNS=6
 SESSION_SUMMARY_ENABLED=true
 SESSION_SUMMARY_TRIGGER_MESSAGES=12
 SESSION_SUMMARY_MAX_CHARS=2000
+EVAL_RUN_STALE_TIMEOUT_SECONDS=3600
 LANGGRAPH_CHECKPOINT_DB=...
 ```
 
@@ -410,6 +432,7 @@ source venv/bin/activate
 python -m compileall rag assistant_backend
 python manage.py check
 python manage.py makemigrations --check --dry-run
+pytest rag/tests -q
 ```
 
 前端：
@@ -418,6 +441,8 @@ python manage.py makemigrations --check --dry-run
 cd /AIAssistant/frontend
 npm run build
 ```
+
+GitHub Actions（`.github/workflows/backend-tests.yml`）会在 `backend/**` 变更时自动运行上述后端检查与 pytest。
 
 命令行评测：
 
