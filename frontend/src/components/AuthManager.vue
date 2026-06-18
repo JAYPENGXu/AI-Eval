@@ -1,17 +1,21 @@
 <template>
-  <AuthPanel v-if="!store.access" :auth="auth" :error="error" @login="login" @register="register" />
-  <slot v-else :user="store.user" :logout="logout"></slot>
+  <AuthPanel v-if="!access" :auth="auth" :error="error" @login="login" @register="register" />
+  <slot v-else :user="user" :logout="logout"></slot>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { api } from '../api'
-import { store } from '../main'
+import { useAuthStore } from '../stores/auth'
 import AuthPanel from './AuthPanel.vue'
 
-const props = defineProps({
-  bootstrap: { type: Function, required: true },
-})
+const props = defineProps<{
+  bootstrap: () => Promise<void>
+}>()
+
+const authStore = useAuthStore()
+const { access, user } = storeToRefs(authStore)
 
 const auth = reactive({ username: '', password: '' })
 const error = ref('')
@@ -29,13 +33,10 @@ async function login() {
   if (!validateAuthForm()) return
   try {
     const token = await api.login(auth.username.trim(), auth.password)
-    store.access = token.access
-    store.refresh = token.refresh
-    localStorage.setItem('access', token.access)
-    localStorage.setItem('refresh', token.refresh)
+    authStore.setTokens(token)
     await props.bootstrap()
   } catch (err) {
-    error.value = err.message
+    error.value = err instanceof Error ? err.message : String(err)
   }
 }
 
@@ -46,19 +47,16 @@ async function register() {
     await api.register(auth.username.trim(), auth.password)
     await login()
   } catch (err) {
-    error.value = err.message
+    error.value = err instanceof Error ? err.message : String(err)
   }
 }
 
 function logout() {
-  store.access = ''
-  store.refresh = ''
-  store.user = null
-  localStorage.clear()
+  authStore.logout()
 }
 
 onMounted(async () => {
-  if (store.access) {
+  if (access.value) {
     try {
       await props.bootstrap()
     } catch {

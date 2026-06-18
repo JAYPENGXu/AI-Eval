@@ -1,6 +1,7 @@
 import { reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { api } from '../api'
+import { getErrorMessage, shouldIgnoreRequestError } from './polling'
 
 export function useChat({
   selectedKb,
@@ -66,7 +67,8 @@ export function useChat({
         ? '已记录负反馈，并生成待确认的回归样例动作'
         : '已记录正反馈'
     } catch (err) {
-      actionError.value = err.message
+      if (shouldIgnoreRequestError(err)) return
+      actionError.value = getErrorMessage(err)
     } finally {
       busy.feedback = ''
     }
@@ -259,7 +261,8 @@ export function useChat({
         },
       })
     } catch (err) {
-      actionError.value = err.message
+      if (shouldIgnoreRequestError(err)) return
+      actionError.value = getErrorMessage(err)
       if (!assistantMessage.content) {
         messages.value = messages.value.filter((message) => message.id !== assistantMessage.id)
       }

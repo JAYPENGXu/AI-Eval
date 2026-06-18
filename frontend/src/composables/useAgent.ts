@@ -1,7 +1,7 @@
 import { ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { api } from '../api'
-import { sleep } from './helpers'
+import { getErrorMessage, shouldIgnoreRequestError, sleep } from './polling'
 
 export function useAgent({
   selectedKb,
@@ -61,6 +61,33 @@ export function useAgent({
     return threadId
   }
 
+  function applyAgentResult(result) {
+    if (!result) return
+    agentResult.value = result
+    currentAgentThreadId.value = result.thread_id || currentAgentThreadId.value
+    agentForm.thread_id = currentAgentThreadId.value
+    if (currentAgentThreadId.value) {
+      localStorage.setItem(agentThreadStorageKey(), currentAgentThreadId.value)
+    }
+    activeExperimentPlan.value = result.experiment_plan || activeExperimentPlan.value
+  }
+
+  async function loadAgentThreadState() {
+    if (!selectedKb.value) return
+    const threadId = localStorage.getItem(agentThreadStorageKey()) || currentAgentThreadId.value
+    if (!threadId) return
+    try {
+      const state = await api.getRagopsAgentState({ thread_id: threadId })
+      applyAgentResult(state)
+    } catch (err) {
+      if (shouldIgnoreRequestError(err)) return
+      const message = getErrorMessage(err)
+      if (!message.includes('404') && !message.toLowerCase().includes('not found')) {
+        actionError.value = message
+      }
+    }
+  }
+
   function resetAgentThread() {
     if (!selectedKb.value) return
     localStorage.removeItem(agentThreadStorageKey())
@@ -73,7 +100,7 @@ export function useAgent({
 
   watch(
     () => [selectedKb.value?.id, agentForm.trace_id, agentForm.eval_run_id, agentForm.compare_eval_run_id],
-    () => {
+    async () => {
       if (!selectedKb.value) {
         currentAgentThreadId.value = ''
         agentForm.thread_id = ''
@@ -82,6 +109,7 @@ export function useAgent({
       const threadId = localStorage.getItem(agentThreadStorageKey()) || ''
       currentAgentThreadId.value = threadId
       agentForm.thread_id = threadId
+      await loadAgentThreadState()
     },
   )
 
@@ -133,9 +161,7 @@ export function useAgent({
         thread_id: ensureAgentThreadId(),
         message: agentForm.message,
       })
-      currentAgentThreadId.value = agentResult.value?.thread_id || currentAgentThreadId.value
-      agentForm.thread_id = currentAgentThreadId.value
-      activeExperimentPlan.value = agentResult.value?.experiment_plan || null
+      applyAgentResult(agentResult.value)
       await loadAgentActions()
     })
     busy.agent = false
@@ -196,6 +222,9 @@ export function useAgent({
     updateAgentActionCard(card, { status: 'running' })
     try {
       const updated = await api.confirmAgentAction(actionId)
+      if (updated.agent_result) {
+        applyAgentResult(updated.agent_result)
+      }
       if (updated.action_type === 'run_experiment_plan' && updated.result?.plan_id) {
         updateAgentActionCard(card, { status: updated.status || 'running', result: updated.result })
         activeExperimentPlan.value = await api.getExperimentPlan(updated.result.plan_id)
@@ -234,8 +263,9 @@ export function useAgent({
       }
       notice.value = `Agent 动作${actionStatusText(updated)}：${updated.created_case_id || updated.result?.plan_id || displayActionTitle(updated)}`
     } catch (err) {
-      updateAgentActionCard(card, { status: 'failed', error_message: err.message })
-      actionError.value = err.message
+      if (shouldIgnoreRequestError(err)) return
+      updateAgentActionCard(card, { status: 'failed', error_message: getErrorMessage(err) })
+      actionError.value = getErrorMessage(err)
     } finally {
       busy.agentAction = ''
     }
@@ -324,6 +354,7 @@ export function useAgent({
     resetAgentThread,
     runAgent,
     loadAgentActions,
+    loadAgentThreadState,
     confirmAgentAction,
     refreshExperimentPlan,
     hasDiagnosis,

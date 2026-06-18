@@ -15,6 +15,8 @@ from .views import (
     chunk_methods,
     me,
     ragops_agent_run,
+    ragops_agent_state,
+    ragops_agent_resume,
     model_usage_summary,
     reset_workspace,
 )
@@ -36,6 +38,8 @@ urlpatterns = [
     path("chunk-methods/", chunk_methods),
     path("model-usage/summary/", model_usage_summary),
     path("ragops-agent/run/", ragops_agent_run),
+    path("ragops-agent/state/", ragops_agent_state),
+    path("ragops-agent/resume/", ragops_agent_resume),
     path("reset-workspace/", reset_workspace),
     path("", include(router.urls)),
 ]

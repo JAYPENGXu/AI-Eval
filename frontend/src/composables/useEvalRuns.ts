@@ -1,10 +1,12 @@
 import { computed, ref } from 'vue'
 import { api } from '../api'
+import type { RagEvalRun } from '../types/api'
+import type { UseEvalRunsOptions } from '../types/workbench'
 import {
   buildEvalRunComparison,
   isCaseFailedAt,
-  sleep,
 } from './helpers'
+import { getErrorMessage, shouldIgnoreRequestError, sleep } from './polling'
 
 export function useEvalRuns({
   selectedKb,
@@ -14,13 +16,13 @@ export function useEvalRuns({
   actionError,
   runAction,
   benchmarkCases,
-}) {
-  const evalRuns = ref([])
-  const selectedEvalRun = ref(null)
-  const selectedEvalRunIds = ref([])
-  const selectedBaselineEvalRunId = ref(null)
+}: UseEvalRunsOptions) {
+  const evalRuns = ref<RagEvalRun[]>([])
+  const selectedEvalRun = ref<RagEvalRun | null>(null)
+  const selectedEvalRunIds = ref<number[]>([])
+  const selectedBaselineEvalRunId = ref<number | null>(null)
   const selectedEvalSuite = ref('')
-  const pollingEvalRunIds = ref(new Set())
+  const pollingEvalRunIds = ref(new Set<number>())
 
   const isEvalRunning = computed(() =>
     busy.eval ||
@@ -173,7 +175,8 @@ export function useEvalRuns({
       selectedEvalRun.value = result
       notice.value = `评测完成：RAGAS Run #${result.id}`
     } catch (err) {
-      actionError.value = err.message
+      if (shouldIgnoreRequestError(err)) return
+      actionError.value = getErrorMessage(err)
     } finally {
       const next = new Set(pollingEvalRunIds.value)
       next.delete(id)

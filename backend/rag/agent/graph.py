@@ -11,10 +11,16 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 try:
     from langgraph.graph import END, StateGraph
+    from langgraph.types import Command, interrupt
 except ImportError:
     END = "__end__"
     StateGraph = None
+    Command = None
 
+    def interrupt(value):  # type: ignore[misc]
+        return value
+
+from rag.agent.actions import execute_agent_action
 from rag.model_usage import elapsed_ms, extract_usage, record_model_call
 from rag.experiments import create_experiment_action, create_experiment_plan
 from rag.models import KnowledgeBase, RagAgentAction, RagEvalCaseResult, RagEvalRun, RagTrace
@@ -41,10 +47,13 @@ class AgentState(TypedDict, total=False):
     tool_results: list[dict]
     action_cards: list[dict]
     human_decisions: list[dict]
+    human_response: dict
+    execution_results: list[dict]
     diagnosis: dict
     experiment_plan: dict | None
     workflow_intent: str
     answer: str
+    status: str
 
 
 AVAILABLE_TOOLS = [
@@ -66,6 +75,56 @@ AVAILABLE_TOOLS = [
 ]
 
 
+def graph_config(thread_id: str) -> dict:
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def get_thread_snapshot(graph, thread_id: str):
+    if not thread_id:
+        return None
+    try:
+        return graph.get_state(graph_config(thread_id))
+    except Exception:
+        logger.exception("failed to read agent thread snapshot thread_id=%s", thread_id)
+        return None
+
+
+def is_thread_interrupted(snapshot) -> bool:
+    return bool(snapshot and snapshot.next)
+
+
+def assert_thread_owner(snapshot, user) -> None:
+    values = snapshot.values if snapshot else {}
+    metadata = (values or {}).get("thread_metadata") or {}
+    owner_id = metadata.get("user_id")
+    if owner_id is not None and owner_id != user.id:
+        raise PermissionError("Agent thread does not belong to the current user.")
+
+
+def serialize_agent_result(state: AgentState, *, thread_id: str, thread_business_key: str, snapshot=None) -> dict:
+    interrupted = is_thread_interrupted(snapshot)
+    status = "interrupted" if interrupted else "completed"
+    answer = state.get("answer", "")
+    if interrupted and not answer:
+        answer = build_pre_hitl_summary(state)
+    return {
+        "status": status,
+        "awaiting_human": interrupted or bool(state.get("awaiting_human")),
+        "answer": answer,
+        "plan": state.get("plan", []),
+        "tool_calls": state.get("tool_calls", []),
+        "tool_results": state.get("tool_results", []),
+        "action_cards": state.get("action_cards", []),
+        "human_response": state.get("human_response") or {},
+        "execution_results": state.get("execution_results") or [],
+        "diagnosis": state.get("diagnosis", {}),
+        "experiment_plan": state.get("experiment_plan"),
+        "workflow_intent": state.get("workflow_intent", ""),
+        "thread_id": state.get("thread_id", thread_id),
+        "thread_business_key": state.get("thread_business_key", thread_business_key),
+    }
+
+
 def run_ragops_agent(
     *,
     user,
@@ -77,7 +136,17 @@ def run_ragops_agent(
     thread_id: str = "",
     thread_business_key: str = "",
 ) -> dict:
+    if not thread_id:
+        raise ValueError("thread_id is required for RAGOps Agent runs.")
+
     graph = build_graph()
+    config = graph_config(thread_id)
+    snapshot = get_thread_snapshot(graph, thread_id)
+    if snapshot and snapshot.values:
+        assert_thread_owner(snapshot, user)
+        if is_thread_interrupted(snapshot):
+            return serialize_agent_result(snapshot.values, thread_id=thread_id, thread_business_key=thread_business_key, snapshot=snapshot)
+
     thread_metadata = {
         "thread_id": thread_id,
         "business_key": thread_business_key,
@@ -87,37 +156,63 @@ def run_ragops_agent(
         "eval_run_id": eval_run_id,
         "compare_eval_run_id": compare_eval_run_id,
     }
-    config = {"configurable": {"thread_id": thread_id}} if thread_id else None
-    initial_state = {
-            "user_id": user.id,
-            "message": message,
-            "kb_id": kb_id,
-            "trace_id": trace_id,
-            "eval_run_id": eval_run_id,
-            "compare_eval_run_id": compare_eval_run_id,
-            "workflow_intent": "",
-            "plan": [],
-            "tool_calls": [],
-            "tool_results": [],
-            "human_decisions": [],
-            "action_cards": [],
-            "thread_id": thread_id,
-            "thread_business_key": thread_business_key,
-            "thread_metadata": thread_metadata,
-        }
-    state = graph.invoke(initial_state, config=config) if config else graph.invoke(initial_state)
-    return {
-        "answer": state.get("answer", ""),
-        "plan": state.get("plan", []),
-        "tool_calls": state.get("tool_calls", []),
-        "tool_results": state.get("tool_results", []),
-        "action_cards": state.get("action_cards", []),
-        "diagnosis": state.get("diagnosis", {}),
-        "experiment_plan": state.get("experiment_plan"),
-        "workflow_intent": state.get("workflow_intent", ""),
-        "thread_id": state.get("thread_id", thread_id),
-        "thread_business_key": state.get("thread_business_key", thread_business_key),
+    initial_state: AgentState = {
+        "user_id": user.id,
+        "message": message,
+        "kb_id": kb_id,
+        "trace_id": trace_id,
+        "eval_run_id": eval_run_id,
+        "compare_eval_run_id": compare_eval_run_id,
+        "workflow_intent": "",
+        "plan": [],
+        "tool_calls": [],
+        "tool_results": [],
+        "human_decisions": [],
+        "human_response": {},
+        "execution_results": [],
+        "action_cards": [],
+        "thread_id": thread_id,
+        "thread_business_key": thread_business_key,
+        "thread_metadata": thread_metadata,
+        "status": "running",
+        "awaiting_human": False,
     }
+    state = graph.invoke(initial_state, config=config)
+    snapshot = get_thread_snapshot(graph, thread_id)
+    return serialize_agent_result(state, thread_id=thread_id, thread_business_key=thread_business_key, snapshot=snapshot)
+
+
+def get_ragops_agent_state(*, user, thread_id: str) -> dict | None:
+    if not thread_id:
+        return None
+    graph = build_graph()
+    snapshot = get_thread_snapshot(graph, thread_id)
+    if not snapshot or not snapshot.values:
+        return None
+    assert_thread_owner(snapshot, user)
+    business_key = (snapshot.values.get("thread_business_key") or "")
+    return serialize_agent_result(snapshot.values, thread_id=thread_id, thread_business_key=business_key, snapshot=snapshot)
+
+
+def resume_ragops_agent(*, user, thread_id: str, resume_payload: dict) -> dict:
+    if not thread_id:
+        raise ValueError("thread_id is required.")
+    if Command is None:
+        raise RuntimeError("LangGraph resume is unavailable in this environment.")
+
+    graph = build_graph()
+    config = graph_config(thread_id)
+    snapshot = get_thread_snapshot(graph, thread_id)
+    if not snapshot or not snapshot.values:
+        raise ValueError("Agent thread not found.")
+    assert_thread_owner(snapshot, user)
+    if not is_thread_interrupted(snapshot):
+        raise ValueError("Agent thread is not awaiting human decision.")
+
+    state = graph.invoke(Command(resume=resume_payload), config=config)
+    snapshot = get_thread_snapshot(graph, thread_id)
+    business_key = state.get("thread_business_key") or snapshot.values.get("thread_business_key") or ""
+    return serialize_agent_result(state, thread_id=thread_id, thread_business_key=business_key, snapshot=snapshot)
 
 def build_graph():
     if StateGraph is None:
@@ -128,13 +223,15 @@ def build_graph():
     workflow.add_node("diagnostician", diagnostician_node)
     workflow.add_node("proposal", proposal_node)
     workflow.add_node("human_decision", human_decision_node)
+    workflow.add_node("action_executor", action_executor_node)
     workflow.add_node("responder", responder_node)
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "tool_executor")
     workflow.add_edge("tool_executor", "diagnostician")
     workflow.add_edge("diagnostician", "proposal")
     workflow.add_edge("proposal", "human_decision")
-    workflow.add_edge("human_decision", "responder")
+    workflow.add_edge("human_decision", "action_executor")
+    workflow.add_edge("action_executor", "responder")
     workflow.add_edge("responder", END)
     checkpointer = get_agent_checkpointer()
     if checkpointer:
@@ -144,13 +241,19 @@ def build_graph():
 
 class SequentialAgentGraph:
     def invoke(self, state: AgentState, config: dict | None = None) -> AgentState:
+        if Command is not None and isinstance(state, Command):
+            raise RuntimeError("LangGraph Command resume requires a compiled LangGraph checkpointer.")
         state = planner_node(state)
         state = tool_executor_node(state)
         state = diagnostician_node(state)
         state = proposal_node(state)
         state = human_decision_node(state)
+        state = action_executor_node(state)
         state = responder_node(state)
-        return state
+        return {**state, "status": "completed", "awaiting_human": False}
+
+    def get_state(self, config: dict | None = None):
+        return None
 
 
 def state_user(state: AgentState):
@@ -286,23 +389,114 @@ def proposal_node(state: AgentState) -> AgentState:
 
 
 def human_decision_node(state: AgentState) -> AgentState:
-    cards = []
-    for decision in state.get("human_decisions", []):
-        card = human_decision_tool(state, decision)
-        if card:
-            cards.append(card)
-    return {**state, "action_cards": cards}
+    cards = state.get("action_cards")
+    if cards is None:
+        cards = []
+        for decision in state.get("human_decisions", []):
+            card = human_decision_tool(state, decision)
+            if card:
+                cards.append(card)
+        state = {**state, "action_cards": cards}
+
+    if not cards:
+        return {**state, "awaiting_human": False}
+
+    resume_payload = interrupt(
+        {
+            "action_cards": cards,
+            "awaiting_human": True,
+            **thread_payload(state),
+        }
+    )
+    return {**state, "human_response": resume_payload or {}, "awaiting_human": False}
+
+
+def action_executor_node(state: AgentState) -> AgentState:
+    response = state.get("human_response") or {}
+    action_id = response.get("action_id")
+    decision = str(response.get("decision") or "").lower()
+    if not action_id or not decision:
+        return state
+
+    user = state_user(state)
+    action = RagAgentAction.objects.filter(id=int(action_id), owner=user).first()
+    results = list(state.get("execution_results") or [])
+    if not action:
+        results.append({"action_id": action_id, "ok": False, "error": "Action not found."})
+        return {**state, "execution_results": results}
+
+    if decision == "rejected":
+        if action.status not in {"completed", "rejected"}:
+            action.status = "rejected"
+            action.rejected_reason = str(response.get("reason") or "")
+            action.completed_at = timezone.now()
+            action.save(update_fields=["status", "rejected_reason", "completed_at", "updated_at"])
+        results.append({"action_id": action.id, "decision": "rejected", "status": action.status})
+        return {**state, "execution_results": results}
+
+    if decision != "confirmed":
+        results.append({"action_id": action.id, "ok": False, "error": f"Unsupported decision: {decision}"})
+        return {**state, "execution_results": results}
+
+    try:
+        result = execute_agent_action(user=user, action=action)
+        action.refresh_from_db()
+        results.append(
+            {
+                "action_id": action.id,
+                "decision": "confirmed",
+                "status": action.status,
+                "result": result,
+                "created_case_id": getattr(action.created_case, "case_id", None),
+            }
+        )
+    except Exception as exc:
+        logger.exception("ragops action execution failed action_id=%s", action_id)
+        action.refresh_from_db()
+        results.append(
+            {
+                "action_id": action.id,
+                "decision": "confirmed",
+                "ok": False,
+                "status": action.status,
+                "error": str(exc),
+            }
+        )
+    return {**state, "execution_results": results}
 
 
 def responder_node(state: AgentState) -> AgentState:
     diagnosis = state.get("diagnosis") or build_diagnosis(state)
     action_cards = state.get("action_cards", [])
+    execution_results = state.get("execution_results") or []
+    human_response = state.get("human_response") or {}
+    if execution_results:
+        for item in execution_results:
+            action_id = item.get("action_id")
+            if not action_id:
+                continue
+            for card in action_cards:
+                if card.get("action_id") == action_id:
+                    card["status"] = item.get("status") or card.get("status")
+                    if item.get("result"):
+                        card["result"] = item["result"]
+                    if item.get("created_case_id"):
+                        card["created_case_id"] = item["created_case_id"]
+                    if item.get("error"):
+                        card["error_message"] = item["error"]
     if state.get("workflow_intent") == "experiment_optimization":
         plan = state.get("experiment_plan") or {}
-        answer = (
-            f"已基于 Baseline Run #{plan.get('baseline_run')} 生成参数实验计划 #{plan.get('id')}。"
-            "我已经通过 human_decision_tool 向你请求确认；确认后会批量运行实验 Eval Run，并在计划详情中推荐 Winner。"
-        )
+        if execution_results:
+            answer = build_post_action_answer(state, action_cards, execution_results, human_response)
+        else:
+            answer = (
+                f"已基于 Baseline Run #{plan.get('baseline_run')} 生成参数实验计划 #{plan.get('id')}。"
+                "我已经通过 human_decision_tool 向你请求确认；确认后会批量运行实验 Eval Run，并在计划详情中推荐 Winner。"
+            )
+        return {**state, "answer": answer, "action_cards": action_cards, "diagnosis": diagnosis}
+
+    if execution_results:
+        answer = build_post_action_answer(state, action_cards, execution_results, human_response)
         return {**state, "answer": answer, "action_cards": action_cards, "diagnosis": diagnosis}
 
     prompt = (
@@ -409,6 +603,57 @@ def parse_json_object(text: str) -> dict:
         if not match:
             raise
         return json.loads(match.group(0))
+
+
+def build_pre_hitl_summary(state: AgentState) -> str:
+    diagnosis = state.get("diagnosis") or {}
+    cards = state.get("action_cards") or []
+    summary = diagnosis.get("summary") or "Agent 已完成证据收集与结构化诊断。"
+    if cards:
+        summary += f"\n\n已生成 {len(cards)} 个待确认动作。请确认或拒绝后继续，LangGraph 将从 checkpoint 恢复并生成最终报告。"
+    else:
+        summary += "\n\n工作流正在等待人工决策。"
+    return summary
+
+
+def build_post_action_answer(
+    state: AgentState,
+    action_cards: list[dict],
+    execution_results: list[dict],
+    human_response: dict,
+) -> str:
+    decision = human_response.get("decision")
+    if decision == "rejected":
+        return "你已拒绝本次 Agent 写操作。当前诊断与证据仍然保留，可继续调整参数或重新运行工作流。"
+
+    lines = ["已完成人工确认后的 Agent 写操作，摘要如下："]
+    for item in execution_results:
+        action_id = item.get("action_id")
+        card = next((entry for entry in action_cards if entry.get("action_id") == action_id), {})
+        title = card.get("title") or f"Action #{action_id}"
+        status = item.get("status") or "unknown"
+        if item.get("ok") is False or status == "failed":
+            lines.append(f"- {title}：执行失败（{item.get('error') or '未知错误'}）")
+            continue
+        if status == "running":
+            lines.append(f"- {title}：已开始后台执行，可在实验计划详情中跟踪进度。")
+            continue
+        created_case_id = item.get("created_case_id") or (item.get("result") or {}).get("case_id")
+        if created_case_id:
+            lines.append(f"- {title}：已完成，Regression Case `{created_case_id}` 已创建。")
+            continue
+        plan_id = (item.get("result") or {}).get("plan_id")
+        if plan_id:
+            lines.append(f"- {title}：实验计划 #{plan_id} 已开始运行。")
+            continue
+        lines.append(f"- {title}：状态 {status}。")
+
+    if state.get("workflow_intent") == "experiment_optimization":
+        plan = state.get("experiment_plan") or {}
+        lines.append(f"\nBaseline Run #{plan.get('baseline_run')} 的参数实验计划 #{plan.get('id')} 已进入执行阶段。")
+    else:
+        lines.append("\n建议下一步：在 Regression Set 或实验计划结果中验证修复效果。")
+    return "\n".join(lines)
 
 
 def fallback_answer(state: AgentState) -> str:

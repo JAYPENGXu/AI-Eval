@@ -23,3 +23,5 @@ export const api = {
   ...agentApi,
   ...workspaceApi,
 }
+
+export type ApiClient = typeof api

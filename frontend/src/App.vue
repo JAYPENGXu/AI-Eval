@@ -236,7 +236,8 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { api } from './api'
-import { store } from './main'
+import { useAuthStore } from './stores/auth'
+import { getErrorMessage, shouldIgnoreRequestError } from './composables/polling'
 import AuthManager from './components/AuthManager.vue'
 import RagChatPanel from './components/Chat/RagChatPanel.vue'
 import AppSidebar from './components/Sidebar/AppSidebar.vue'
@@ -266,6 +267,8 @@ import {
 import { useEvalRuns } from './composables/useEvalRuns'
 import { useChat } from './composables/useChat'
 import { useAgent } from './composables/useAgent'
+
+const authStore = useAuthStore()
 
 const kbs = ref([])
 const documents = ref([])
@@ -418,7 +421,8 @@ async function runAction(fn) {
   try {
     await fn()
   } catch (err) {
-    actionError.value = err.message
+    if (shouldIgnoreRequestError(err)) return
+    actionError.value = getErrorMessage(err)
   } finally {
     busy.preview = false
     busy.index = false
@@ -955,7 +959,7 @@ async function resetWorkspace() {
 }
 
 async function bootstrap() {
-  store.user = await api.me()
+  authStore.setUser(await api.me())
   chunkMethods.value = await api.chunkMethods()
   await loadKbs()
   documents.value = await api.listDocuments()

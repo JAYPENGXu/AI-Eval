@@ -91,6 +91,10 @@
           选择失败 Trace 或 Baseline Eval Run 后启动工作流。Agent 会把诊断结论、证据、优化方案和需要你确认的动作展示在这里。
         </div>
         <template v-else>
+          <section v-if="agentResult.awaiting_human" class="agent-awaiting-banner trace-section">
+            <strong>工作流已暂停，等待人工确认</strong>
+            <p>LangGraph 已在 human_decision 节点 interrupt 并写入 checkpoint。确认或拒绝下方动作后，工作流将从 checkpoint 恢复并生成最终报告。</p>
+          </section>
           <section v-if="hasDiagnosis(agentResult.diagnosis)" class="trace-section structured-diagnosis">
             <div class="diagnosis-head">
               <h3>结构化诊断</h3>

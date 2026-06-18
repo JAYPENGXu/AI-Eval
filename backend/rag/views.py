@@ -18,7 +18,8 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from .agent.services import run_ragops_agent
+from .agent.actions import execute_agent_action
+from .agent.services import get_ragops_agent_state, resume_ragops_agent, run_ragops_agent
 from .case_factory import create_regression_case_from_eval_case, create_regression_case_from_trace, create_regression_case_from_user_feedback
 from .eval_runs import reconcile_stale_eval_run, reconcile_stale_eval_runs
 from .experiments import refresh_experiment_plan, start_experiment_plan
@@ -82,6 +83,21 @@ def normalize_agent_thread_id(user_id, business_key, provided):
         return value
     compact_key = business_key.replace("|", ":").replace(":", "_")
     return f"ragops:{compact_key}:{uuid.uuid4().hex[:12]}"
+
+
+def get_action_thread_id(action_obj) -> str:
+    payload = action_obj.payload or {}
+    return str((payload.get("agent_thread") or {}).get("thread_id") or "").strip()
+
+
+def is_action_thread_awaiting_human(user, thread_id: str) -> bool:
+    if not thread_id:
+        return False
+    try:
+        state = get_ragops_agent_state(user=user, thread_id=thread_id)
+    except PermissionError:
+        return False
+    return bool(state and state.get("awaiting_human"))
 
 
 def sse_event(event: str, data: dict | list) -> str:
@@ -205,6 +221,52 @@ def ragops_agent_run(request):
         )
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except PermissionError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    return Response(result)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def ragops_agent_state(request):
+    thread_id = str(request.query_params.get("thread_id") or "").strip()
+    if not thread_id:
+        return Response({"detail": "thread_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        result = get_ragops_agent_state(user=request.user, thread_id=thread_id)
+    except PermissionError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    if not result:
+        return Response({"detail": "Agent thread not found."}, status=status.HTTP_404_NOT_FOUND)
+    return Response(result)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def ragops_agent_resume(request):
+    thread_id = str(request.data.get("thread_id") or "").strip()
+    if not thread_id:
+        return Response({"detail": "thread_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    resume_payload = request.data.get("resume")
+    if not isinstance(resume_payload, dict):
+        resume_payload = {
+            "decision": request.data.get("decision"),
+            "action_id": request.data.get("action_id"),
+            "reason": request.data.get("reason") or "",
+        }
+
+    try:
+        action_id = resume_payload.get("action_id")
+        if action_id is not None:
+            resume_payload["action_id"] = int(action_id)
+        result = resume_ragops_agent(user=request.user, thread_id=thread_id, resume_payload=resume_payload)
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except PermissionError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    except RuntimeError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response(result)
 
 
@@ -582,46 +644,36 @@ class RagAgentActionViewSet(viewsets.ReadOnlyModelViewSet):
         if action_obj.status == "rejected":
             return Response({"detail": "Rejected actions cannot be confirmed."}, status=status.HTTP_400_BAD_REQUEST)
 
-        action_obj.confirmed_at = timezone.now()
-        action_obj.status = "pending"
-        action_obj.error_message = ""
-        action_obj.save(update_fields=["confirmed_at", "status", "error_message", "updated_at"])
+        thread_id = get_action_thread_id(action_obj)
+        if is_action_thread_awaiting_human(request.user, thread_id):
+            try:
+                agent_result = resume_ragops_agent(
+                    user=request.user,
+                    thread_id=thread_id,
+                    resume_payload={
+                        "decision": "confirmed",
+                        "action_id": action_obj.id,
+                    },
+                )
+                action_obj.refresh_from_db()
+                data = RagAgentActionSerializer(action_obj).data
+                data["agent_result"] = agent_result
+                return Response(data)
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            except PermissionError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+            except Exception as exc:
+                action_obj.refresh_from_db()
+                data = RagAgentActionSerializer(action_obj).data
+                data["error_message"] = str(exc)
+                return Response(data, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            if action_obj.action_type == "run_experiment_plan":
-                plan_id = action_obj.payload.get("experiment_plan")
-                plan = start_experiment_plan(user=request.user, plan_id=int(plan_id))
-                action_obj.status = "running"
-                action_obj.result = {"plan_id": plan.id, "status": plan.status, "variant_count": plan.variants.count()}
-                action_obj.error_message = ""
-                action_obj.save(update_fields=["status", "result", "error_message", "updated_at"])
-                return Response(RagAgentActionSerializer(action_obj).data)
-
-            if action_obj.action_type != "create_regression_case":
-                raise ValueError(f"Unsupported action type: {action_obj.action_type}")
-            if action_obj.source == "trace":
-                trace_id = action_obj.payload.get("trace") or action_obj.trace_id
-                result = create_regression_case_from_trace(user=request.user, trace_id=int(trace_id), payload=action_obj.payload)
-            elif action_obj.source == "eval_failure":
-                eval_case_id = action_obj.payload.get("eval_case") or action_obj.eval_case_result_id
-                result = create_regression_case_from_eval_case(user=request.user, eval_case_result_id=int(eval_case_id), payload=action_obj.payload)
-            elif action_obj.source == "user_feedback":
-                feedback_id = action_obj.payload.get("feedback")
-                result = create_regression_case_from_user_feedback(user=request.user, feedback_id=int(feedback_id), payload=action_obj.payload)
-            else:
-                raise ValueError(f"Unsupported action source: {action_obj.source}")
-
-            action_obj.status = "completed"
-            action_obj.created_case = result.case
-            action_obj.completed_at = timezone.now()
-            action_obj.result = {"created": result.created, "case_id": result.case.case_id, "case_pk": result.case.id}
-            action_obj.error_message = ""
-            action_obj.save(update_fields=["status", "created_case", "completed_at", "result", "error_message", "updated_at"])
+            execute_agent_action(user=request.user, action=action_obj)
+            action_obj.refresh_from_db()
         except Exception as exc:
-            action_obj.status = "failed"
-            action_obj.error_message = str(exc)
-            action_obj.completed_at = timezone.now()
-            action_obj.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
+            action_obj.refresh_from_db()
             return Response(RagAgentActionSerializer(action_obj).data, status=status.HTTP_400_BAD_REQUEST)
         return Response(RagAgentActionSerializer(action_obj).data)
 
@@ -630,8 +682,31 @@ class RagAgentActionViewSet(viewsets.ReadOnlyModelViewSet):
         action_obj = self.get_object()
         if action_obj.status == "completed":
             return Response({"detail": "Completed actions cannot be rejected."}, status=status.HTTP_400_BAD_REQUEST)
+
+        thread_id = get_action_thread_id(action_obj)
+        reason = request.data.get("reason") or ""
+        if is_action_thread_awaiting_human(request.user, thread_id):
+            try:
+                agent_result = resume_ragops_agent(
+                    user=request.user,
+                    thread_id=thread_id,
+                    resume_payload={
+                        "decision": "rejected",
+                        "action_id": action_obj.id,
+                        "reason": reason,
+                    },
+                )
+                action_obj.refresh_from_db()
+                data = RagAgentActionSerializer(action_obj).data
+                data["agent_result"] = agent_result
+                return Response(data)
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            except PermissionError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+
         action_obj.status = "rejected"
-        action_obj.rejected_reason = request.data.get("reason") or ""
+        action_obj.rejected_reason = reason
         action_obj.completed_at = timezone.now()
         action_obj.save(update_fields=["status", "rejected_reason", "completed_at", "updated_at"])
         return Response(RagAgentActionSerializer(action_obj).data)
