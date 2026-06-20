@@ -1,3 +1,5 @@
+export type AnyRecord = Record<string, any>
+
 export interface User {
   id: number
   username: string
@@ -29,7 +31,7 @@ export interface ChunkRecord {
   index: number
   content: string
   token_count?: number
-  metadata?: Record<string, unknown>
+  metadata?: AnyRecord
 }
 
 export interface ChatSession {
@@ -58,7 +60,7 @@ export interface SourceRecord {
   score?: number
   engine?: string
   content?: string
-  metadata?: Record<string, unknown>
+  metadata?: AnyRecord
 }
 
 export interface RagTrace {
@@ -74,11 +76,11 @@ export interface RagTrace {
   hybrid_results?: unknown[]
   rerank_results?: unknown[]
   compression_results?: unknown[]
-  compression_stats?: Record<string, unknown>
+  compression_stats?: AnyRecord
   original_context?: string
   compressed_context?: string
   final_prompt?: string
-  settings?: Record<string, unknown>
+  settings?: AnyRecord
   message_content?: string
   created_at?: string
 }
@@ -89,13 +91,13 @@ export interface RagEvalRun {
   status: 'running' | 'completed' | 'failed' | string
   metrics?: string[]
   mean_scores?: Record<string, number>
-  retrieval_metrics?: Record<string, unknown>
+  retrieval_metrics?: AnyRecord
   case_count?: number
   case_results?: RagEvalCaseResult[]
   baseline_run?: number | null
   param_signature?: string
   error_message?: string
-  settings?: Record<string, unknown>
+  settings?: AnyRecord
   created_at?: string
 }
 
@@ -104,7 +106,7 @@ export interface RagEvalCaseResult {
   case_id: string
   question?: string
   scores?: Record<string, number>
-  diagnostics?: Record<string, unknown>
+  diagnostics?: AnyRecord
 }
 
 export interface RagBenchmarkCase {
@@ -124,33 +126,63 @@ export interface RagAgentResult {
   awaiting_human?: boolean
   answer?: string
   plan?: Array<{ step?: string; reason?: string } | string>
-  tool_calls?: Array<Record<string, unknown>>
-  tool_results?: Array<Record<string, unknown>>
-  action_cards?: Array<Record<string, unknown>>
-  diagnosis?: Record<string, unknown>
+  tool_calls?: AnyRecord[]
+  tool_results?: AnyRecord[]
+  action_cards?: AgentActionCard[]
+  diagnosis?: AnyRecord
   experiment_plan?: RagExperimentPlan | null
   workflow_intent?: string
   thread_id?: string
   thread_business_key?: string
-  execution_results?: Array<Record<string, unknown>>
+  execution_results?: AnyRecord[]
+}
+
+export interface AgentActionCard {
+  id: number | string
+  action_id?: number
+  action_type?: string
+  type?: string
+  action_uid?: string
+  status?: string
+  title?: string
+  description?: string
+  confirm_label?: string
+  source?: string
+  payload?: AnyRecord
+  result?: AnyRecord
+  failure_signals?: AnyRecord[]
+  created_case_id?: string
+  error_message?: string
+  created_at?: string
 }
 
 export interface RagAgentAction {
   id: number
   action_type?: string
+  action_uid?: string
   status?: string
+  source?: string
   title?: string
   description?: string
-  payload?: Record<string, unknown>
-  result?: Record<string, unknown>
+  confirm_label?: string
+  payload?: AnyRecord
+  result?: AnyRecord
   created_case_id?: string
   error_message?: string
+  created_at?: string
 }
 
 export interface RagExperimentPlan {
   id: number
   status?: string
-  recommendation?: { winner_name?: string }
+  goal?: string
+  baseline_run?: number
+  baseline_param_signature?: string
+  failure_cases?: AnyRecord[]
+  failure_summary?: AnyRecord
+  recommendation?: { winner_name?: string; reason?: string } & AnyRecord
+  winner_variant?: number | null
+  variants?: AnyRecord[]
 }
 
 export interface UserFeedback {
@@ -166,7 +198,7 @@ export interface ModelUsageSummary {
     total_tokens?: number
     total_cost?: number
   }
-  by_model?: Array<Record<string, unknown>>
+  by_model?: AnyRecord[]
 }
 
 export interface RagOptions {

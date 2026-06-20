@@ -3037,3 +3037,24 @@ header {
     filter: none;
   }
 }
+
+.hitl-section {
+  scroll-margin-top: 96px;
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.hitl-section-highlight {
+  border-color: #2563eb !important;
+  background: #eff6ff !important;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
+  animation: hitlPulse 1.4s ease-in-out 2;
+}
+
+@keyframes hitlPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.24);
+  }
+}

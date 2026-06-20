@@ -165,7 +165,7 @@
             <h3>Agent 报告</h3>
             <pre class="agent-report">{{ agentResult.answer }}</pre>
           </section>
-          <section v-if="agentResult.action_cards?.length" class="trace-section">
+          <section v-if="agentResult.action_cards?.length" ref="hitlActionSection" class="trace-section hitl-section" :class="{ 'hitl-section-highlight': hitlHighlight }">
             <h3>人工确认动作</h3>
             <article v-for="card in agentResult.action_cards" :key="card.id" class="action-card">
               <div>
@@ -180,7 +180,7 @@
                 <small>{{ actionCardMeta(card) }}</small>
               </div>
               <el-button type="primary" @click="$emit('confirm-action', card)" :disabled="!!busy.agentAction || isAgentCardDone(card)" :loading="isAgentCardRunning(card)">
-                {{ isAgentCardDone(card) ? '已完成' : (isAgentCardRunning(card) ? '执行中' : card.confirm_label || '确认') }}
+                {{ isAgentCardDone(card) ? '已完成' : (isAgentCardRunning(card) ? '执行中' : card.confirm_label || '确认执行写操作') }}
               </el-button>
             </article>
           </section>
@@ -207,7 +207,7 @@
               </div>
             </article>
           </section>
-          <section class="trace-section">
+          <section ref="pendingActionSection" class="trace-section hitl-section" :class="{ 'hitl-section-highlight': hitlHighlight && !agentResult.action_cards?.length && pendingAgentActions.length }">
             <div class="trace-title">
               <h3>待确认动作</h3>
               <span>{{ pendingAgentActions.length }} 项</span>
@@ -228,7 +228,7 @@
                   :disabled="!!busy.agentAction || action.status === 'completed' || action.status === 'running'"
                   :loading="busy.agentAction === `action-${action.id}`"
                 >
-                  {{ busy.agentAction === `action-${action.id}` ? '执行中' : (action.status === 'running' ? '执行中' : (action.confirm_label || '确认')) }}
+                  {{ busy.agentAction === `action-${action.id}` ? '执行中' : (action.status === 'running' ? '执行中' : (action.confirm_label || '确认执行写操作')) }}
                 </el-button>
               </article>
             </div>
@@ -269,7 +269,7 @@
                     :disabled="!!busy.agentAction"
                     :loading="busy.agentAction === `action-${action.id}`"
                   >
-                    {{ busy.agentAction === `action-${action.id}` ? '执行中' : '确认' }}
+                    {{ busy.agentAction === `action-${action.id}` ? '执行中' : '确认执行' }}
                   </el-button>
                   <span v-else-if="action.status === 'running'" class="status-pill">执行中</span>
                   <span v-else class="status-pill">{{ actionStatusText(action) }}</span>
@@ -293,7 +293,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 const props = defineProps({
   active: { type: Boolean, default: false },
   collapseValue: { type: Array, default: () => ['agent'] },
@@ -336,6 +336,12 @@ const repairTargetContext = computed(() => {
   return parts.length ? parts.join('，') : '请先选择失败 Trace 或 Baseline Eval Run'
 })
 
+const hitlActionSection = ref(null)
+const pendingActionSection = ref(null)
+const hitlHighlight = ref(false)
+let hitlHighlightTimer = 0
+let lastHitlSignature = ''
+
 const auditStatusFilter = ref('pending')
 const auditFilters = [
   { value: 'pending', label: '待确认' },
@@ -360,6 +366,28 @@ const filteredAuditActions = computed(() => {
 const visibleAuditActions = computed(() =>
   auditStatusFilter.value === 'all' ? filteredAuditActions.value : filteredAuditActions.value.slice(0, 3)
 )
+
+const hitlSignal = computed(() => {
+  const cards = props.agentResult?.action_cards || []
+  const cardIds = cards.map((card) => card.action_id || card.id).join(',')
+  const actionIds = pendingAgentActions.value.map((action) => action.id + ':' + action.status).join(',')
+  return [props.agentResult?.awaiting_human ? 'awaiting' : 'ready', cardIds, actionIds].join('|')
+})
+
+watch(hitlSignal, async (signature) => {
+  const hasActionCards = Boolean(props.agentResult?.action_cards?.length)
+  const hasPendingActions = pendingAgentActions.value.length > 0
+  if (!props.active || (!hasActionCards && !hasPendingActions) || signature === lastHitlSignature) return
+  lastHitlSignature = signature
+  await nextTick()
+  const target = hasActionCards ? hitlActionSection.value : pendingActionSection.value
+  target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  hitlHighlight.value = true
+  window.clearTimeout(hitlHighlightTimer)
+  hitlHighlightTimer = window.setTimeout(() => {
+    hitlHighlight.value = false
+  }, 2800)
+}, { flush: 'post' })
 
 function actionSourceLabel(action) {
   const map = {

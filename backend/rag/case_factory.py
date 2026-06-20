@@ -44,7 +44,7 @@ def create_regression_case_from_trace(*, user, trace_id: int, payload: dict[str,
             "failure_signals": payload.get("failure_signals") or [],
         },
     }
-    case, created = RagBenchmarkCase.objects.update_or_create(
+    case, created = RagBenchmarkCase.objects.get_or_create(
         kb=trace.session.kb,
         case_id=case_id,
         defaults=defaults,
@@ -98,7 +98,7 @@ def create_regression_case_from_eval_case(*, user, eval_case_result_id: int, pay
             "failure_signals": payload.get("failure_signals") or [],
         },
     }
-    case, created = RagBenchmarkCase.objects.update_or_create(
+    case, created = RagBenchmarkCase.objects.get_or_create(
         kb=result.run.kb,
         case_id=case_id,
         defaults=defaults,
@@ -145,7 +145,7 @@ def create_regression_case_from_user_feedback(*, user, feedback_id: int, payload
             "created_from": "user_feedback",
         },
     }
-    case, created = RagBenchmarkCase.objects.update_or_create(
+    case, created = RagBenchmarkCase.objects.get_or_create(
         kb=feedback.session.kb,
         case_id=case_id,
         defaults=defaults,

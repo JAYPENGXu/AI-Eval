@@ -46,6 +46,17 @@ Agent 修复闭环展示系统如何围绕失败 Trace 或 Baseline Eval Run 收
 - Agent：LangGraph、SQLite checkpointer、LangGraph 原生 interrupt/resume、HITL Action Card、Agent 审计记录。
 - 模型：通过 `backend/.env` 中的 OpenAI-compatible 配置调用聊天、Embedding、Rerank、Rewrite、Compression。
 
+## 生产化边界与后续演进
+
+这个仓库定位是 RAGOps 学习与工程化演示项目，强调 RAG 链路可观测、可评测、可回归和 HITL 修复闭环；默认配置优先服务本地开发与演示。若要进入生产环境，建议按以下方向演进：
+
+- **配置与密钥安全**：本地开发通过 `backend/.env` 读取模型和向量库配置；生产环境应关闭 `DEBUG`、使用强 `SECRET_KEY`、限制 `ALLOWED_HOSTS/CORS_ALLOWED_ORIGINS`，并通过密钥管理系统注入 API Key，避免写入日志或提交到仓库。
+- **任务队列与可靠性**：当前 Session Summary、Eval Run、Experiment Plan 采用轻量后台执行方式，适合单机演示；生产环境建议替换为 Celery/RQ/云任务队列，提供任务持久化、重试、超时控制、并发限制和可观测告警。
+- **数据与向量存储扩展**：当前默认 SQLite + Milvus Lite 便于本地复现；生产环境可迁移到 PostgreSQL + Milvus Server/Zilliz Cloud，并增加索引重建、向量库与业务库一致性校验、备份恢复流程。
+- **上传与访问控制**：上传文件应增加大小限制、类型白名单、内容扫描和租户隔离策略；所有 KB、Trace、Eval、Agent Action API 都应保持 owner 级别过滤，避免跨用户数据泄露。
+- **LLM-as-Judge 风险控制**：Judge 输出应经过 JSON Schema 校验、分数范围 clamp 和 parse failure 记录；Prompt 中应明确忽略被评估答案或引用内容里的指令，避免 prompt injection 影响评分。
+- **关键链路不静默降级**：Embedding、Vector Search、Rerank 等影响答案可靠性的关键步骤失败时，应明确提示并写入 Trace/ModelCallLog，而不是伪装成低质量答案继续返回。
+- **测试与 CI 门禁**：后端应持续覆盖 Query Router、Hybrid、Case Factory 幂等、Deterministic Scorer、Agent Action 状态流转等核心路径；前端应运行 `npm run typecheck` 和 `npm run build`，避免类型债重新积累。
 ## 目录结构
 
 ```text

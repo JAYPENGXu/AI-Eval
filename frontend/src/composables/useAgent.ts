@@ -1,7 +1,32 @@
 import { ref, watch } from 'vue'
+import type { Ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { api } from '../api'
 import { getErrorMessage, shouldIgnoreRequestError, sleep } from './polling'
+import type { AgentActionCard, AnyRecord, KnowledgeBase, RagAgentAction, RagAgentResult, RagExperimentPlan } from '../types/api'
+import type { BusyState } from '../types/workbench'
+
+interface AgentFormState {
+  trace_id?: number | string | null
+  eval_run_id?: number | string | null
+  compare_eval_run_id?: number | string | null
+  message: string
+  thread_id: string
+}
+
+type AgentCardLike = AgentActionCard | RagAgentAction
+
+interface UseAgentOptions {
+  selectedKb: Ref<KnowledgeBase | null>
+  agentForm: AgentFormState
+  busy: BusyState
+  notice: Ref<string>
+  actionError: Ref<string>
+  runAction: (fn: () => Promise<void>) => Promise<void>
+  loadBenchmarkCases: () => Promise<void>
+  loadEvalRuns: () => Promise<void>
+  selectedDatasetSuite: Ref<string>
+}
 
 export function useAgent({
   selectedKb,
@@ -13,12 +38,12 @@ export function useAgent({
   loadBenchmarkCases,
   loadEvalRuns,
   selectedDatasetSuite,
-}) {
-  const agentResult = ref(null)
-  const agentActions = ref([])
+}: UseAgentOptions) {
+  const agentResult = ref<RagAgentResult | null>(null)
+  const agentActions = ref<RagAgentAction[]>([])
   const currentAgentThreadId = ref('')
-  const activeExperimentPlan = ref(null)
-  const completedAgentActions = ref(new Set())
+  const activeExperimentPlan = ref<RagExperimentPlan | null>(null)
+  const completedAgentActions = ref<Set<string>>(new Set())
 
   function resetAgentState() {
     agentResult.value = null
@@ -61,7 +86,7 @@ export function useAgent({
     return threadId
   }
 
-  function applyAgentResult(result) {
+  function applyAgentResult(result: RagAgentResult | null) {
     if (!result) return
     agentResult.value = result
     currentAgentThreadId.value = result.thread_id || currentAgentThreadId.value
@@ -150,11 +175,12 @@ export function useAgent({
     if (!selectedKb.value || !agentForm.message.trim()) return
     const shouldRun = await confirmRunAgent()
     if (!shouldRun) return
+    const kb = selectedKb.value
     await runAction(async () => {
       busy.agent = true
       completedAgentActions.value = new Set()
       agentResult.value = await api.runRagopsAgent({
-        kb: selectedKb.value.id,
+        kb: kb.id,
         trace: agentForm.trace_id,
         eval_run: agentForm.eval_run_id,
         compare_eval_run: agentForm.compare_eval_run_id,
@@ -175,34 +201,35 @@ export function useAgent({
     agentActions.value = await api.listAgentActions({ kb: selectedKb.value.id })
   }
 
-  function agentActionBusyKey(card) {
+  function agentActionBusyKey(card: AgentCardLike | null | undefined): string {
     if (!card) return ''
-    if (card.action_id) return `action-${card.action_id}`
-    return card.action_type || card.type || card.action_uid ? `action-${card.id}` : `card-${card.id}`
+    if ('action_id' in card && card.action_id) return `action-${card.action_id}`
+    return card.action_type || ('type' in card && card.type) || card.action_uid ? `action-${card.id}` : `card-${card.id}`
   }
 
-  function agentActionCompletionKey(card) {
+  function agentActionCompletionKey(card: AgentCardLike | null | undefined): string {
     if (!card) return ''
-    if (card.action_id) return `action-${card.action_id}`
-    return card.action_type || card.type || card.action_uid ? `action-${card.id}` : `card-${card.id}`
+    if ('action_id' in card && card.action_id) return `action-${card.action_id}`
+    return card.action_type || ('type' in card && card.type) || card.action_uid ? `action-${card.id}` : `card-${card.id}`
   }
 
-  function isAgentCardRunning(card) {
+  function isAgentCardRunning(card: AgentCardLike | null | undefined): boolean {
     if (!card) return false
     return busy.agentAction === agentActionBusyKey(card) || card.status === 'running'
   }
 
-  function updateAgentActionCard(card, patch) {
+  function updateAgentActionCard(card: AgentCardLike | null | undefined, patch: AnyRecord) {
     if (!agentResult.value?.action_cards?.length) return
     agentResult.value.action_cards = agentResult.value.action_cards.map((item) => {
-      const sameAction = card?.action_id && item.action_id === card.action_id
-      const sameCard = !card?.action_id && item.id === card?.id
+      const cardActionId = card && 'action_id' in card ? card.action_id : undefined
+      const sameAction = Boolean(cardActionId && item.action_id === cardActionId)
+      const sameCard = !cardActionId && item.id === card?.id
       return sameAction || sameCard ? { ...item, ...patch } : item
     })
   }
 
-  async function confirmAgentAction(card) {
-    const actionId = card?.action_id || card?.id
+  async function confirmAgentAction(card: AgentCardLike) {
+    const actionId = ('action_id' in card && card.action_id) || card?.id
     if (!actionId) return
     try {
       await ElMessageBox.confirm(
@@ -221,14 +248,15 @@ export function useAgent({
     busy.agentAction = busyId
     updateAgentActionCard(card, { status: 'running' })
     try {
-      const updated = await api.confirmAgentAction(actionId)
+      const updated = await api.confirmAgentAction(Number(actionId))
       if (updated.agent_result) {
         applyAgentResult(updated.agent_result)
       }
       if (updated.action_type === 'run_experiment_plan' && updated.result?.plan_id) {
+        const planId = Number(updated.result.plan_id)
         updateAgentActionCard(card, { status: updated.status || 'running', result: updated.result })
-        activeExperimentPlan.value = await api.getExperimentPlan(updated.result.plan_id)
-        await pollExperimentPlan(updated.result.plan_id)
+        activeExperimentPlan.value = await api.getExperimentPlan(planId)
+        await pollExperimentPlan(planId)
         await loadAgentActions()
         const latest = agentActions.value.find((item) => item.id === updated.id)
         if (latest) {
@@ -271,16 +299,17 @@ export function useAgent({
     }
   }
 
-  async function refreshExperimentPlan(planId = activeExperimentPlan.value?.id) {
+  async function refreshExperimentPlan(planId: number | undefined = activeExperimentPlan.value?.id) {
     if (!planId) return
     activeExperimentPlan.value = await api.getExperimentPlan(planId)
     return activeExperimentPlan.value
   }
 
-  async function pollExperimentPlan(planId) {
+  async function pollExperimentPlan(planId: number) {
     for (let attempt = 0; attempt < 120; attempt += 1) {
       const plan = await refreshExperimentPlan(planId)
-      if (!plan || ['completed', 'failed'].includes(plan.status)) {
+      const planStatus = plan?.status || ''
+      if (!plan || ['completed', 'failed'].includes(planStatus)) {
         await loadAgentActions()
         if (plan?.status === 'completed') {
           await loadEvalRuns()
@@ -293,39 +322,39 @@ export function useAgent({
     return activeExperimentPlan.value
   }
 
-  function hasDiagnosis(diagnosis) {
+  function hasDiagnosis(diagnosis: AnyRecord | null | undefined): boolean {
     return Boolean(diagnosis && (diagnosis.summary || diagnosis.failure_signals?.length || diagnosis.recommendations?.length))
   }
 
-  function diagnosisSeverityText(severity) {
-    const map = {
+  function diagnosisSeverityText(severity: string | undefined): string {
+    const map: Record<string, string> = {
       high: '高风险',
       medium: '中风险',
       low: '低风险',
       info: '观察',
     }
-    return map[severity] || '观察'
+    return map[severity || 'info'] || '观察'
   }
 
-  function diagnosisSeverityClass(severity) {
+  function diagnosisSeverityClass(severity: string | undefined): string {
     return severity || 'info'
   }
 
-  function displayActionTitle(action) {
+  function displayActionTitle(action: AgentCardLike | null | undefined): string {
     const title = action?.title || ''
-    const map = {
+    const map: Record<string, string> = {
       'Create Regression Case': '创建 Regression Case',
       'Create Regression Case from Failure': '从失败样例创建 Regression Case',
     }
     return map[title] || title
   }
 
-  function isAgentCardDone(card) {
+  function isAgentCardDone(card: AgentCardLike | null | undefined): boolean {
     if (isAgentCardRunning(card)) return false
     return completedAgentActions.value.has(agentActionCompletionKey(card)) || card?.status === 'completed'
   }
 
-  function actionStatusText(action) {
+  function actionStatusText(action: AgentCardLike | null | undefined): string {
     if (!action) return '-'
     if (action.status === 'running') return '执行中'
     if (action.status === 'completed') return `已完成${action.created_case_id ? ` -> ${action.created_case_id}` : ''}`
@@ -334,11 +363,11 @@ export function useAgent({
     return '待确认'
   }
 
-  function actionFailureSignals(card) {
-    return card?.failure_signals || card?.payload?.failure_signals || []
+  function actionFailureSignals(card: AgentCardLike | null | undefined): AnyRecord[] {
+    return (card && 'failure_signals' in card ? card.failure_signals : undefined) || card?.payload?.failure_signals || []
   }
 
-  function actionCardMeta(card) {
+  function actionCardMeta(card: AgentCardLike | null | undefined): string {
     if (card?.source === 'trace') return `Trace #${card.payload?.trace || '-'}`
     if (card?.source === 'eval_failure') return `Eval Case Result #${card.payload?.eval_case || '-'}`
     return card?.source || ''

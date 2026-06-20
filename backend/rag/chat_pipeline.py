@@ -143,7 +143,7 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
         context={"owner": session.owner, "kb": session.kb, "session": session},
     )
     original_context = "\n\n---\n\n".join(
-        f"\u6765\u6e90\uff1a{source['document']}\n\u5185\u5bb9\uff1a{source['content']}" for source in rerank_results
+        f"来源：{source['document']}\n内容：{source['content']}" for source in rerank_results
     )
     sources, compression_stats = compress_context(
         retrieval_query,

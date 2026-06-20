@@ -1,64 +1,67 @@
-export function sleep(ms) {
+import type { AnyRecord, RagEvalCaseResult, RagEvalRun, SourceRecord } from '../types/api'
+
+export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
-export function numberOrNull(value) {
+export function numberOrNull(value: unknown): number | null {
   const number = Number(value)
   return Number.isFinite(number) ? number : null
 }
 
-export function deltaScore(left, right) {
+export function deltaScore(left: number | null, right: number | null): number | null {
   return left === null || right === null ? null : right - left
 }
 
-export function formatDate(value) {
+export function formatDate(value?: string | number | Date | null): string {
   return value ? new Date(value).toLocaleString() : '-'
 }
 
-export function compactText(value, length = 88) {
+export function compactText(value: unknown, length = 88): string {
   const text = String(value || '').replace(/\s+/g, ' ').trim()
-  return text.length > length ? `${text.slice(0, length)}...` : text
+  return text.length > length ? text.slice(0, length) + '...' : text
 }
 
-export function formatEvalScore(value) {
+export function formatEvalScore(value: unknown): string {
   const number = Number(value)
   return Number.isFinite(number) ? number.toFixed(4) : '-'
 }
 
-export function formatSignedScore(value) {
+export function formatSignedScore(value: unknown): string {
   const number = Number(value)
   if (!Number.isFinite(number)) return ''
-  return `${number >= 0 ? '+' : ''}${number.toFixed(4)}`
+  return (number >= 0 ? '+' : '') + number.toFixed(4)
 }
 
-export function scoreDeltaClass(value) {
+export function scoreDeltaClass(value: unknown): string {
   const number = Number(value)
   if (!Number.isFinite(number) || number === 0) return 'score-delta neutral'
   return number > 0 ? 'score-delta positive' : 'score-delta negative'
 }
 
-export function metricLabel(metric) {
-  const labels = {
-    faithfulness: 'Faithfulness',
-    answer_relevancy: 'Answer Relevancy',
-    context_precision: 'Context Precision',
-    context_recall: 'Context Recall',
-  }
-  return labels[metric] || metric
+const metricLabels: Record<string, string> = {
+  faithfulness: 'Faithfulness',
+  answer_relevancy: 'Answer Relevancy',
+  context_precision: 'Context Precision',
+  context_recall: 'Context Recall',
 }
 
-export function formatDiagnosticPercent(value) {
+export function metricLabel(metric: string): string {
+  return metricLabels[metric] || metric
+}
+
+export function formatDiagnosticPercent(value: unknown): string {
   const number = Number(value)
   if (!Number.isFinite(number)) return '-'
-  return `${Math.round(number * 100)}%`
+  return Math.round(number * 100) + '%'
 }
 
-export function formatTerms(terms) {
+export function formatTerms(terms?: unknown[] | null): string {
   if (!terms || !terms.length) return '无关键项命中'
-  return terms.slice(0, 6).join('、')
+  return terms.slice(0, 6).map((term) => String(term)).join('、')
 }
 
-const ragParamLabels = {
+const ragParamLabels: Record<string, string> = {
   query_rewrite_strategy: 'Query Rewrite',
   top_k: 'Vector TopK',
   bm25_top_k: 'BM25 TopK',
@@ -67,14 +70,14 @@ const ragParamLabels = {
   compression_strategy: '压缩策略',
 }
 
-function formatSettingValue(value) {
+function formatSettingValue(value: unknown): string {
   if (value === undefined || value === null || value === '') return '-'
   if (Array.isArray(value)) return value.join(', ')
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
 
-export function diffSettings(left, right) {
+export function diffSettings(left: AnyRecord = {}, right: AnyRecord = {}) {
   const preferredKeys = Object.keys(ragParamLabels)
   const keys = Array.from(new Set([...preferredKeys, ...Object.keys(left), ...Object.keys(right)]))
   return keys
@@ -95,7 +98,7 @@ const retrievalStages = [
   { key: 'compression', label: 'Compression' },
 ]
 
-export function retrievalMetricRows(metrics = {}) {
+export function retrievalMetricRows(metrics: AnyRecord = {}) {
   return retrievalStages.map((stage) => ({
     stage: stage.key,
     label: stage.label,
@@ -106,16 +109,17 @@ export function retrievalMetricRows(metrics = {}) {
   }))
 }
 
-function compareRetrievalMetrics(leftMetrics = {}, rightMetrics = {}) {
+function compareRetrievalMetrics(leftMetrics: AnyRecord = {}, rightMetrics: AnyRecord = {}) {
   return retrievalMetricRows(rightMetrics).flatMap((rightRow) => {
-    const leftRow = retrievalMetricRows(leftMetrics).find((item) => item.stage === rightRow.stage) || {}
+    const leftRow = retrievalMetricRows(leftMetrics).find((item) => item.stage === rightRow.stage)
     return ['hit_rate', 'recall_at_k', 'mrr'].map((metric) => {
-      const leftValue = numberOrNull(leftRow[metric])
-      const rightValue = numberOrNull(rightRow[metric])
+      const key = metric as 'hit_rate' | 'recall_at_k' | 'mrr'
+      const leftValue = numberOrNull(leftRow?.[key])
+      const rightValue = numberOrNull(rightRow[key])
       return {
         stage: rightRow.stage,
         metric,
-        label: `${rightRow.label} ${metric}`,
+        label: rightRow.label + ' ' + metric,
         left: leftValue,
         right: rightValue,
         delta: deltaScore(leftValue, rightValue),
@@ -124,7 +128,7 @@ function compareRetrievalMetrics(leftMetrics = {}, rightMetrics = {}) {
   })
 }
 
-export function isCaseFailedAt(item, stageKey) {
+export function isCaseFailedAt(item: RagEvalCaseResult, stageKey: string): boolean {
   if (stageKey === 'final_answer') {
     const finalAnswer = item.diagnostics?.final_answer
     return !!finalAnswer && finalAnswer.correct === false
@@ -133,7 +137,7 @@ export function isCaseFailedAt(item, stageKey) {
   return !!stage && stage.hit === false
 }
 
-export function buildEvalRunComparison(left, right) {
+export function buildEvalRunComparison(left: RagEvalRun, right: RagEvalRun) {
   if (!left?.case_results || !right?.case_results) return null
   const metricNames = Array.from(new Set([...(left.metrics || []), ...(right.metrics || [])]))
   const rightCaseMap = new Map((right.case_results || []).map((item) => [item.case_id, item]))
@@ -173,11 +177,11 @@ export function buildEvalRunComparison(left, right) {
   }
 }
 
-export function chunkOrder(results = []) {
-  return results.slice(0, 5).map((item) => item.chunk_id).filter(Boolean)
+export function chunkOrder(results: SourceRecord[] = []): number[] {
+  return results.slice(0, 5).map((item) => item.chunk_id).filter((id): id is number => Boolean(id))
 }
 
-export function compareChunkOrder(left = [], right = []) {
+export function compareChunkOrder(left: SourceRecord[] = [], right: SourceRecord[] = []) {
   const leftOrder = chunkOrder(left)
   const rightOrder = chunkOrder(right)
   const shared = leftOrder.filter((id) => rightOrder.includes(id))
@@ -189,7 +193,7 @@ export function compareChunkOrder(left = [], right = []) {
   }
 }
 
-export function diagnosticStages(item) {
+export function diagnosticStages(item: RagEvalCaseResult) {
   const stages = item.diagnostics?.stages || {}
   return [
     { key: 'vector', label: 'Vector TopK', ...(stages.vector || {}) },
@@ -200,6 +204,6 @@ export function diagnosticStages(item) {
   ]
 }
 
-export function finalDiagnostic(item) {
+export function finalDiagnostic(item: RagEvalCaseResult): AnyRecord {
   return item.diagnostics?.final_answer || {}
 }

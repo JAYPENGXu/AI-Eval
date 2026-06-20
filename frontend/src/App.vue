@@ -815,7 +815,7 @@ async function createCaseFromTrace(trace) {
     activeWorkbenchTab.value = 'datasets'
     await loadBenchmarkCases()
     await loadModelUsage()
-    notice.value = `${result.created ? 'Created' : 'Updated'} regression case: ${result.case.case_id}`
+    notice.value = `${result.created ? '已创建' : '已存在'} Regression Case：${result.case.case_id}`
   })
 }
 
@@ -826,7 +826,7 @@ async function createCaseFromEvalCase(item) {
     selectedDatasetSuite.value = 'regression'
     activeWorkbenchTab.value = 'datasets'
     await loadBenchmarkCases()
-    notice.value = `${result.created ? 'Created' : 'Updated'} regression case: ${result.case.case_id}`
+    notice.value = `${result.created ? '已创建' : '已存在'} Regression Case：${result.case.case_id}`
   })
 }
 

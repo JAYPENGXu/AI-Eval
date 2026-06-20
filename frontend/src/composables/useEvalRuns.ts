@@ -34,7 +34,7 @@ export function useEvalRuns({
   const selectedEvalRuns = computed(() =>
     selectedEvalRunIds.value
       .map((id) => evalRuns.value.find((run) => run.id === id))
-      .filter(Boolean)
+      .filter((run): run is RagEvalRun => Boolean(run))
   )
 
   const selectedBaselineEvalRun = computed(() =>
@@ -87,7 +87,8 @@ export function useEvalRuns({
     busy.evalLoad = true
     try {
       evalRuns.value = await api.listEvalRuns({ kb: selectedKb.value.id })
-      if (selectedEvalRun.value && !evalRuns.value.some((run) => run.id === selectedEvalRun.value.id)) {
+      const currentSelectedId = selectedEvalRun.value?.id
+      if (currentSelectedId && !evalRuns.value.some((run) => run.id === currentSelectedId)) {
         selectedEvalRun.value = null
       }
       selectedEvalRunIds.value = selectedEvalRunIds.value.filter((id) => evalRuns.value.some((run) => run.id === id))
@@ -100,7 +101,7 @@ export function useEvalRuns({
     }
   }
 
-  async function openEvalRun(run) {
+  async function openEvalRun(run: RagEvalRun) {
     busy.evalDetail = run.id
     try {
       const detail = run.case_results ? run : await api.getEvalRun(run.id)
@@ -114,14 +115,14 @@ export function useEvalRuns({
     }
   }
 
-  async function setBaselineEvalRun(run) {
+  async function setBaselineEvalRun(run: RagEvalRun) {
     if (!run?.id) return
     if (!run.case_results) await openEvalRun(run)
     selectedBaselineEvalRunId.value = run.id
     notice.value = `已设置 Baseline Run #${run.id}（${run.param_signature || 'no-signature'}）`
   }
 
-  async function compareEvalRunWithBaseline(run) {
+  async function compareEvalRunWithBaseline(run: RagEvalRun) {
     if (!run?.id || !selectedBaselineEvalRunId.value || selectedBaselineEvalRunId.value === run.id) return
     const baseline = evalRuns.value.find((item) => item.id === selectedBaselineEvalRunId.value)
     if (!baseline) return
@@ -130,7 +131,7 @@ export function useEvalRuns({
     selectedEvalRunIds.value = [selectedBaselineEvalRunId.value, run.id]
   }
 
-  async function toggleEvalRunCompare(run) {
+  async function toggleEvalRunCompare(run: RagEvalRun) {
     let ids = [...selectedEvalRunIds.value]
     if (ids.includes(run.id)) {
       ids = ids.filter((id) => id !== run.id)
@@ -147,7 +148,7 @@ export function useEvalRuns({
     )
   }
 
-  async function pollEvalRun(id) {
+  async function pollEvalRun(id: number) {
     let intervalMs = 3000
     const maxIntervalMs = 10000
     for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -165,7 +166,7 @@ export function useEvalRuns({
     throw new Error('RAGAS 评测仍在运行，请稍后刷新评测报告')
   }
 
-  async function startEvalPolling(id) {
+  async function startEvalPolling(id: number) {
     if (pollingEvalRunIds.value.has(id)) return
     pollingEvalRunIds.value = new Set([...pollingEvalRunIds.value, id])
     busy.eval = true
@@ -187,11 +188,12 @@ export function useEvalRuns({
 
   async function runEval() {
     if (!selectedKb.value || isEvalRunning.value) return
+    const kb = selectedKb.value
     await runAction(async () => {
       busy.eval = true
       notice.value = 'RAGAS 评测正在运行，完成后会自动展示报告'
       const startedRun = await api.runEval({
-        kb: selectedKb.value.id,
+        kb: kb.id,
         suite: selectedEvalSuite.value,
         baseline_run: selectedBaselineEvalRunId.value || undefined,
         rag_options: { ...ragOptions },
@@ -202,7 +204,7 @@ export function useEvalRuns({
     })
   }
 
-  function scrollToEvalCase(id) {
+  function scrollToEvalCase(id: number | string) {
     window.requestAnimationFrame(() => {
       document.getElementById(`eval-case-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
