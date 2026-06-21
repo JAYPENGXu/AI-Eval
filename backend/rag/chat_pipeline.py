@@ -30,6 +30,11 @@ from .session_memory import (
 logger = logging.getLogger(__name__)
 
 
+def source_location_suffix(source: dict) -> str:
+    label = str((source.get("location") or {}).get("label") or "").strip()
+    return f"，{label}" if label else ""
+
+
 def int_option(options: dict, name: str, default: int, *, minimum: int = 1, maximum: int = 50) -> int:
     try:
         value = int(options.get(name, default))
@@ -143,7 +148,7 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
         context={"owner": session.owner, "kb": session.kb, "session": session},
     )
     original_context = "\n\n---\n\n".join(
-        f"来源：{source['document']}\n内容：{source['content']}" for source in rerank_results
+        f"来源：{source['document']}{source_location_suffix(source)}\n内容：{source['content']}" for source in rerank_results
     )
     sources, compression_stats = compress_context(
         retrieval_query,
@@ -156,7 +161,7 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
         source["citation_id"] = citation_id
 
     compressed_context = "\n\n---\n\n".join(
-        f"[{source['citation_id']}] 来源：{source['document']}\n内容：{source['content']}" for source in sources
+        f"[{source['citation_id']}] 来源：{source['document']}{source_location_suffix(source)}\n内容：{source['content']}" for source in sources
     )
     conversation_block = ""
     if session_summary:

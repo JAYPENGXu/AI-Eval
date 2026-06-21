@@ -16,11 +16,45 @@ export interface KnowledgeBase {
   description?: string
 }
 
+export interface DocumentParseRun {
+  id: number
+  status: string
+  parser?: string
+  parser_version?: string
+  progress_current?: number
+  progress_total?: number
+  quality_score?: number | null
+  quality_metrics?: AnyRecord
+  error_code?: string
+  error_message?: string
+}
+
+export interface DocumentPage {
+  page_number: number
+  extraction_method: string
+  text: string
+  markdown?: string
+  blocks: AnyRecord[]
+  char_count: number
+  is_blank: boolean
+  metrics?: AnyRecord
+}
+
+export interface ParsePreview {
+  parse_run: DocumentParseRun
+  page_count: number
+  page: DocumentPage
+}
+
 export interface DocumentRecord {
   id: number
   kb: number
   filename: string
   status?: string
+  mime_type?: string
+  size_bytes?: number
+  sha256?: string
+  latest_parse?: DocumentParseRun | null
   chunk_count?: number
   chunk_method?: string
   error_message?: string
@@ -52,6 +86,16 @@ export interface ChatMessage {
   created_at?: string
 }
 
+export interface SourceLocation {
+  page_start?: number | null
+  page_end?: number | null
+  page_numbers?: number[]
+  heading_path?: string[]
+  paragraph_start?: number | null
+  paragraph_end?: number | null
+  label?: string
+}
+
 export interface SourceRecord {
   citation_id?: number
   rank?: number
@@ -61,6 +105,7 @@ export interface SourceRecord {
   engine?: string
   content?: string
   metadata?: AnyRecord
+  location?: SourceLocation
 }
 
 export interface RagTrace {

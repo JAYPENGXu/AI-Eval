@@ -2,24 +2,35 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 
 from django.conf import settings
-from llama_index.core import SimpleDirectoryReader
 from openai import OpenAI
 
 from .chunkers import ChunkOptions, get_chunker
-from .models import ChatSession, Chunk, Document, KnowledgeBase, RagTrace
+from .document_parsing.ir import load_document_ir
+from .models import ChatSession, Chunk, Document, DocumentParseRun, KnowledgeBase, RagTrace
 from .model_usage import elapsed_ms, extract_usage, record_model_call
 from .vector_store import get_vector_store
 
 logger = logging.getLogger(__name__)
 
 
-def read_document_text(document: Document) -> str:
-    path = Path(document.file.path)
-    docs = SimpleDirectoryReader(input_files=[str(path)]).load_data()
-    return "\n\n".join(item.text for item in docs if item.text).strip()
+class ParseRunNotReadyError(ValueError):
+    pass
+
+
+def resolve_parse_run(document: Document, parse_run_id: int | None = None) -> DocumentParseRun:
+    queryset = document.parse_runs.filter(status="completed")
+    if parse_run_id:
+        queryset = queryset.filter(id=parse_run_id)
+    run = queryset.order_by("-created_at", "-id").first()
+    if not run:
+        raise ParseRunNotReadyError("文档解析尚未完成，或解析结果仍待人工确认。")
+    return run
+
+
+def read_document_text(document: Document, parse_run_id: int | None = None) -> str:
+    return load_document_ir(resolve_parse_run(document, parse_run_id)).text
 
 
 def build_options(data: dict | None) -> ChunkOptions:
@@ -32,10 +43,15 @@ def build_options(data: dict | None) -> ChunkOptions:
     )
 
 
-def preview_chunks(document: Document, method: str, options_data: dict | None) -> list[dict]:
-    text = read_document_text(document)
-    chunker = get_chunker(method)
-    chunks = chunker.split(text, build_options(options_data))
+def preview_chunks(
+    document: Document,
+    method: str,
+    options_data: dict | None,
+    parse_run_id: int | None = None,
+) -> list[dict]:
+    parse_run = resolve_parse_run(document, parse_run_id)
+    document_ir = load_document_ir(parse_run)
+    chunks = get_chunker(method).split(document_ir, build_options(options_data))
     return [
         {
             "index": chunk.index,
@@ -106,10 +122,20 @@ def embed_texts(
     return embeddings
 
 
-def index_document(document: Document, method: str, options_data: dict | None) -> int:
-    chunks = preview_chunks(document, method, options_data)
-    get_vector_store().delete_document(document.id)
-    document.chunks.all().delete()
+def index_document(
+    document: Document,
+    method: str,
+    options_data: dict | None,
+    parse_run_id: int | None = None,
+) -> int:
+    parse_run = resolve_parse_run(document, parse_run_id)
+    chunks = preview_chunks(document, method, options_data, parse_run.id)
+    if not chunks:
+        raise ValueError("解析结果没有可索引内容。")
+    old_chunks = list(document.chunks.all())
+    document.status = "indexing"
+    document.error_message = ""
+    document.save(update_fields=["status", "error_message", "updated_at"])
     texts = [chunk["content"] for chunk in chunks]
     try:
         embeddings = embed_texts(
@@ -117,39 +143,52 @@ def index_document(document: Document, method: str, options_data: dict | None) -
             call_type="embedding_index",
             owner=document.kb.owner,
             kb=document.kb,
-            metadata={"document_id": document.id},
+            metadata={"document_id": document.id, "parse_run_id": parse_run.id},
         )
     except Exception as exc:
-        message = f"Embedding 服务连接失败，文档未完成索引。请检查网络/API 配置后重试。原始错误：{exc}"
+        message = f"Embedding 服务连接失败，旧索引保持可用。请检查网络/API 配置后重试。原始错误：{exc}"
         document.status = "failed"
         document.error_message = message
         document.save(update_fields=["status", "error_message", "updated_at"])
         logger.exception("document embedding failed document=%s", document.id)
         raise RuntimeError(message) from exc
 
-    created_chunks = []
-    for chunk, embedding in zip(chunks, embeddings):
-        created_chunks.append(
-            Chunk.objects.create(
-                document=document,
-                kb=document.kb,
-                index=chunk["index"],
-                content=chunk["content"],
-                token_count=chunk["token_count"],
-                metadata=chunk["metadata"],
-                embedding=embedding,
-            )
+    if len(embeddings) != len(chunks):
+        raise RuntimeError(f"Embedding 返回数量异常：期望 {len(chunks)}，实际 {len(embeddings)}。")
+
+    created_chunks = [
+        Chunk.objects.create(
+            document=document,
+            kb=document.kb,
+            parse_run=parse_run,
+            index=chunk["index"],
+            content=chunk["content"],
+            token_count=chunk["token_count"],
+            metadata=chunk["metadata"],
+            embedding=embedding,
         )
+        for chunk, embedding in zip(chunks, embeddings)
+    ]
+    store = get_vector_store()
     try:
-        get_vector_store().index_chunks(created_chunks)
+        store.delete_document(document.id)
+        store.index_chunks(created_chunks)
     except Exception as exc:
-        message = f"向量索引写入失败，文档未完成索引。请检查 Milvus/Vector Store 状态后重试。原始错误：{exc}"
+        Chunk.objects.filter(id__in=[chunk.id for chunk in created_chunks]).delete()
+        try:
+            store.delete_document(document.id)
+            store.index_chunks(old_chunks)
+        except Exception:
+            logger.exception("failed to restore previous vector index document=%s", document.id)
+        message = f"向量索引写入失败，数据库中的旧索引保持可用。请检查 Milvus 状态后重试。原始错误：{exc}"
         document.status = "failed"
         document.error_message = message
         document.save(update_fields=["status", "error_message", "updated_at"])
         logger.exception("document vector indexing failed document=%s", document.id)
         raise RuntimeError(message) from exc
 
+    if old_chunks:
+        Chunk.objects.filter(id__in=[chunk.id for chunk in old_chunks]).delete()
     document.chunk_method = method
     document.chunk_options = options_data or {}
     document.status = "indexed"

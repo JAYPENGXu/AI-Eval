@@ -91,6 +91,7 @@
             >
               <strong><span class="source-citation">[{{ sourceCitationNumber(source, sourceIndex) }}]</span> {{ source.document }}</strong>
               <span>{{ Number(source.score).toFixed(3) }}</span>
+              <small v-if="source.location?.label" class="source-location">{{ source.location.label }}</small>
               <p>{{ source.content }}</p>
             </div>
           </el-collapse-item>

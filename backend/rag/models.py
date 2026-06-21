@@ -66,7 +66,11 @@ class KnowledgeBase(models.Model):
 class Document(models.Model):
     STATUS_CHOICES = [
         ("uploaded", "Uploaded"),
-        ("chunked", "Chunked"),
+        ("queued", "Queued"),
+        ("parsing", "Parsing"),
+        ("parsed", "Parsed"),
+        ("needs_review", "Needs review"),
+        ("indexing", "Indexing"),
         ("indexed", "Indexed"),
         ("failed", "Failed"),
     ]
@@ -75,6 +79,9 @@ class Document(models.Model):
     filename = models.CharField(max_length=255)
     file = models.FileField(upload_to="documents/%Y/%m/%d/")
     file_type = models.CharField(max_length=50, blank=True, default="")
+    mime_type = models.CharField(max_length=120, blank=True, default="")
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    sha256 = models.CharField(max_length=64, blank=True, default="")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="uploaded")
     chunk_method = models.CharField(max_length=50, default="sentence")
     chunk_options = models.JSONField(default=dict, blank=True)
@@ -86,9 +93,64 @@ class Document(models.Model):
         return self.filename
 
 
+class DocumentParseRun(models.Model):
+    STATUS_CHOICES = [
+        ("queued", "Queued"),
+        ("running", "Running"),
+        ("completed", "Completed"),
+        ("needs_review", "Needs review"),
+        ("failed", "Failed"),
+        ("superseded", "Superseded"),
+    ]
+
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="parse_runs")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    parser = models.CharField(max_length=50, blank=True, default="")
+    parser_version = models.CharField(max_length=30, blank=True, default="")
+    celery_task_id = models.CharField(max_length=100, blank=True, default="")
+    provider_job_id = models.CharField(max_length=160, blank=True, default="")
+    progress_current = models.PositiveIntegerField(default=0)
+    progress_total = models.PositiveIntegerField(default=0)
+    quality_score = models.FloatField(null=True, blank=True)
+    quality_metrics = models.JSONField(default=dict, blank=True)
+    error_code = models.CharField(max_length=80, blank=True, default="")
+    error_message = models.TextField(blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+
+class DocumentPage(models.Model):
+    EXTRACTION_CHOICES = [("native", "Native"), ("ocr", "OCR")]
+
+    parse_run = models.ForeignKey(DocumentParseRun, on_delete=models.CASCADE, related_name="pages")
+    page_number = models.PositiveIntegerField()
+    extraction_method = models.CharField(max_length=20, choices=EXTRACTION_CHOICES, default="native")
+    text = models.TextField(blank=True, default="")
+    markdown = models.TextField(blank=True, default="")
+    blocks = models.JSONField(default=list, blank=True)
+    char_count = models.PositiveIntegerField(default=0)
+    is_blank = models.BooleanField(default=False)
+    metrics = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["page_number"]
+        constraints = [
+            models.UniqueConstraint(fields=["parse_run", "page_number"], name="unique_parse_run_page")
+        ]
+
+
 class Chunk(models.Model):
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="chunks")
     kb = models.ForeignKey(KnowledgeBase, on_delete=models.CASCADE, related_name="chunks")
+    parse_run = models.ForeignKey(
+        DocumentParseRun, null=True, blank=True, on_delete=models.SET_NULL, related_name="chunks"
+    )
     index = models.PositiveIntegerField()
     content = models.TextField()
     token_count = models.PositiveIntegerField(default=0)

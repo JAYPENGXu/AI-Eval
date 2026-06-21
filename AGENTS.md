@@ -15,7 +15,9 @@ Current end-to-end loop:
 
 ```text
 document upload
--> chunking
+-> validation and asynchronous parsing
+-> Document IR quality gate
+-> structure-aware chunking
 -> indexing
 -> query intent routing
 -> session summary memory + recent turns
@@ -42,11 +44,14 @@ document upload
 - `backend/rag/services.py`: RAG pipeline facade (re-exports from split modules).
 - `backend/rag/chat_pipeline.py`: main Q&A orchestration.
 - `backend/rag/retrieval.py`: vector/BM25/hybrid/rerank retrieval.
-- `backend/rag/indexing.py`: document chunking and indexing.
+- `backend/rag/document_parsing/`: parser interface, unified IR, validation, local parsers, PaddleOCR client, and parse orchestration.
+- `backend/rag/tasks.py`: Celery document parsing task.
+- `backend/rag/source_metadata.py`: page/heading/paragraph citation location formatting.
+- `backend/rag/indexing.py`: Parse Run chunking, embedding, and safe vector-index switching.
 - `backend/rag/session_memory.py`: ChatSessionSummary generation.
 - `backend/rag/hybrid.py`: RRF fusion.
 - `backend/rag/eval_runs.py`: stale Eval Run detection and reconciliation.
-- `backend/rag/tests/`: pytest core-path tests (RRF, query_router).
+- `backend/rag/tests/`: pytest coverage for parsing/OCR, document APIs, chunk provenance, RRF, query router, evaluation, and regression-case idempotency.
 - `backend/rag/agent/actions.py`: shared RagAgentAction execution logic.
 - `backend/rag/query_router.py`: lightweight internal knowledge vs web-required route decision.
 - `backend/rag/query_rewrite.py`: retrieval query rewrite logic.
@@ -87,6 +92,9 @@ source venv/bin/activate
 pip install -r requirements.txt
 python manage.py migrate
 python manage.py runserver 127.0.0.1:8010
+
+# separate terminal; Redis must be running
+celery -A assistant_backend worker --loglevel=INFO --concurrency=1
 ```
 
 The backend reads configuration from `backend/.env`.
@@ -109,6 +117,11 @@ SESSION_SUMMARY_TRIGGER_MESSAGES
 SESSION_SUMMARY_MAX_CHARS
 EVAL_RUN_STALE_TIMEOUT_SECONDS
 LANGGRAPH_CHECKPOINT_DB
+PADDLEOCR_JOB_URL
+PADDLEOCR_TOKEN
+PADDLEOCR_MODEL
+CELERY_BROKER_URL
+CELERY_RESULT_BACKEND
 ```
 
 ## Frontend Setup
@@ -179,8 +192,11 @@ Core-path tests currently cover:
 
 - `backend/rag/tests/test_hybrid.py`: RRF fusion and source merging.
 - `backend/rag/tests/test_query_router.py`: internal_knowledge / web_required / unsupported routing.
+- `backend/rag/tests/test_document_parsing.py`: local parsers, PDF/OCR page routing, IR provenance, task leases, and safe reindex.
+- `backend/rag/tests/test_document_api.py`: upload validation, parse queueing, preview, acceptance, and chunking gate.
+- `backend/rag/tests/test_paddleocr.py`: Paddle Job submission, polling, and JSONL result parsing.
 
-When changing RRF, query router, case_factory, or eval stale logic, update or add tests in the same change when reasonable.
+When changing RRF, query router, document parsing, case_factory, or eval stale logic, update or add tests in the same change.
 
 ## RAG Pipeline
 
@@ -252,17 +268,50 @@ Compression strategies may include:
 - structure-aware compression
 - LLM compression
 
+## Document Parsing And Ingestion
+
+Uploaded files must pass through the parsing layer before chunking:
+
+```text
+upload validation
+-> Document + queued DocumentParseRun
+-> Celery / Redis
+-> parser router
+-> TXT / Markdown / DOCX / PyMuPDF
+-> page-level scanned PDF detection
+-> PaddleOCR for scanned pages only
+-> DocumentIR / PageIR / BlockIR
+-> quality gate
+-> expert preview or confirmation
+-> structure-aware chunking
+-> embedding and vector indexing
+```
+
+Rules:
+
+- Supported v1 formats are TXT, Markdown, DOCX, and PDF.
+- Do not trust filename extension or browser MIME alone. Preserve signature, size, page-count, encryption, and DOCX archive validation.
+- Parser implementations live behind the `DocumentParser` interface and must return the common IR.
+- PDF routing is page-level. Do not send text pages to PaddleOCR or silently treat failed OCR pages as blank.
+- Never log `PADDLEOCR_TOKEN`, persist temporary OCR files, or depend on the provider result URL after the task finishes.
+- `DocumentParseRun` owns parser task state and quality metrics. `DocumentPage` owns normalized page blocks.
+- Chunkers consume IR and must preserve `page_start/page_end/page_numbers/heading_path/block_ids/paragraph_range/parser/parse_run_id`.
+- A `needs_review` parse cannot be indexed until an expert accepts it.
+- Reparse and reindex must keep the previous chunks usable until embedding and vector-store writes both succeed.
+- Source location metadata must survive Vector, BM25, Hybrid, Rerank, Compression, ChatMessage sources, and RagTrace.
+- Celery uses Redis and task-id leases. A redelivered task may resume only when its task ID matches the Parse Run lease; stale runs must become `superseded`.
+
 ## Workbench UI
 
 The frontend has three major columns:
 
-- Left: knowledge base, documents, chunking, indexing, reset.
+- Left: knowledge base, document upload, parse/index status, reset.
 - Middle: debug workbench.
 - Right: RAG chat with SSE streaming.
 
 The middle workbench is organized into tabs:
 
-- `Debug`: chunking lab, RAG retrieval debug, parameter tuning.
+- `Debug`: document parse quality/preview, chunking lab, RAG retrieval debug, parameter tuning.
 - `Evaluation`: run evaluations, inspect reports, compare runs, view Failure Analysis.
 - `Datasets`: maintain benchmark, smoke, regression, and release cases.
 - `History`: inspect traces, compare traces, convert trace failures to regression cases.
@@ -437,7 +486,7 @@ Common API areas:
 
 - auth: register, login, current user
 - knowledge bases
-- documents: upload, preview chunks, index, list chunks
+- documents: upload, parse/reparse, parse status, page preview, accept quality result, preview chunks, index, list chunks
 - chat sessions and messages
 - SSE chat endpoint
 - RAG traces: list, detail, compare
@@ -455,6 +504,7 @@ When changing a response shape, update backend serializer/view code and frontend
 ## Editing Notes
 
 - Add Django migrations when model fields change.
+- When changing document parsing, update Parser/IR tests, upload/API tests, Paddle job mocks, chunk provenance, README, and phase-one documentation together.
 - Update admin registration/list displays when a model becomes operationally important.
 - Keep evaluation fallback behavior: if no enabled database benchmark cases exist, the system may fall back to default JSON examples.
 - Keep SSE event format stable unless the frontend is updated at the same time.

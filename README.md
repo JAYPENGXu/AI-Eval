@@ -4,7 +4,7 @@ AIAssistant 是一个面向 RAGOps 的知识库问答、调试、评测和 Agent
 
 当前项目不是一个普通“上传文档然后聊天”的 Demo，而是一个用于学习和演示 RAG 工程化演进的系统：
 
-- 用户可以上传文档、选择切片方式、建立索引并基于知识库问答。
+- 用户可以上传 TXT、Markdown、DOCX、PDF；系统先解析、质检和预览，再进行结构感知切片与索引。
 - 系统会先通过 Query Router 判断问题是否属于内部知识库，实时/联网类问题会被显式拦截。
 - 长对话会异步生成 Session Summary，后续问题改写会结合摘要和最近几轮消息。
 - 开发者可以看到 Query Router、Conversation Memory、Query Rewrite、Vector、BM25、Hybrid、Rerank、Compression、Final Prompt 每一层发生了什么。
@@ -40,6 +40,8 @@ Agent 修复闭环展示系统如何围绕失败 Trace 或 Baseline Eval Run 收
 
 - 后端：Django、Django REST Framework、SimpleJWT、SQLite、pytest。
 - 前端：Vue 3、Vite 7、Element Plus、Pinia、TypeScript。
+- 文档解析：PyMuPDF、python-docx、charset-normalizer、PaddleOCR Job API、统一 Document IR。
+- 异步任务：Celery + Redis 负责持久化文档解析和 OCR 调度。
 - 检索：Milvus Lite 向量索引、SQLite Chunk 元数据、BM25。
 - RAG：Query Router、Session Summary Memory、Query Rewrite、Hybrid Search、Rerank、Context Compression、SSE Streaming。
 - 评测：RAGAS、轻量后台线程、Eval Run 对比、Failure Analysis。
@@ -51,9 +53,9 @@ Agent 修复闭环展示系统如何围绕失败 Trace 或 Baseline Eval Run 收
 这个仓库定位是 RAGOps 学习与工程化演示项目，强调 RAG 链路可观测、可评测、可回归和 HITL 修复闭环；默认配置优先服务本地开发与演示。若要进入生产环境，建议按以下方向演进：
 
 - **配置与密钥安全**：本地开发通过 `backend/.env` 读取模型和向量库配置；生产环境应关闭 `DEBUG`、使用强 `SECRET_KEY`、限制 `ALLOWED_HOSTS/CORS_ALLOWED_ORIGINS`，并通过密钥管理系统注入 API Key，避免写入日志或提交到仓库。
-- **任务队列与可靠性**：当前 Session Summary、Eval Run、Experiment Plan 采用轻量后台执行方式，适合单机演示；生产环境建议替换为 Celery/RQ/云任务队列，提供任务持久化、重试、超时控制、并发限制和可观测告警。
+- **任务队列与可靠性**：文档解析和 PaddleOCR 已使用 Celery + Redis，支持持久任务、超时、重试、进度与 Worker 崩溃后重投；Session Summary、Eval Run、Experiment Plan 仍采用轻量后台执行，生产环境应逐步迁移到同一任务队列。
 - **数据与向量存储扩展**：当前默认 SQLite + Milvus Lite 便于本地复现；生产环境可迁移到 PostgreSQL + Milvus Server/Zilliz Cloud，并增加索引重建、向量库与业务库一致性校验、备份恢复流程。
-- **上传与访问控制**：上传文件应增加大小限制、类型白名单、内容扫描和租户隔离策略；所有 KB、Trace、Eval、Agent Action API 都应保持 owner 级别过滤，避免跨用户数据泄露。
+- **上传与访问控制**：当前已实现大小、类型、文件签名、PDF 页数/加密和 DOCX Zip Bomb 校验，并保持 owner 级 API 过滤；生产环境仍应增加恶意文件扫描、对象存储隔离、配额和数据出域审计。
 - **LLM-as-Judge 风险控制**：Judge 输出应经过 JSON Schema 校验、分数范围 clamp 和 parse failure 记录；Prompt 中应明确忽略被评估答案或引用内容里的指令，避免 prompt injection 影响评分。
 - **关键链路不静默降级**：Embedding、Vector Search、Rerank 等影响答案可靠性的关键步骤失败时，应明确提示并写入 Trace/ModelCallLog，而不是伪装成低质量答案继续返回。
 - **测试与 CI 门禁**：后端应持续覆盖 Query Router、Hybrid、Case Factory 幂等、Deterministic Scorer、Agent Action 状态流转等核心路径；前端应运行 `npm run typecheck` 和 `npm run build`，避免类型债重新积累。
@@ -70,13 +72,15 @@ AIAssistant/
 │   ├── assistant_backend/
 │   └── rag/
 │       ├── agent/              # LangGraph RAGOps Agent（graph / tools / actions / checkpointing）
-│       ├── tests/              # P0 核心路径单元测试（RRF、query_router）
+│       ├── tests/              # Parser、OCR、API、切片、评测与 RAG 核心测试
 │       ├── migrations/
 │       ├── services.py         # RAG 主链路 facade（re-export）
 │       ├── chat_pipeline.py    # 问答编排
 │       ├── retrieval.py        # 检索与 rerank 编排
 │       ├── session_memory.py   # 会话摘要记忆
-│       ├── indexing.py         # 文档切片与索引
+│       ├── document_parsing/   # Parser、统一 IR、上传校验、PaddleOCR 与解析服务
+│       ├── tasks.py            # Celery 文档解析任务
+│       ├── indexing.py         # 基于 Parse Run 的切片、Embedding 与索引切换
 │       ├── hybrid.py           # RRF 融合
 │       ├── query_router.py
 │       ├── query_rewrite.py
@@ -152,6 +156,24 @@ AIAssistant/
 
 详细说明见 [二期功能说明.md](./二期功能说明.md)。
 
+## 文档解析与精细引用
+
+上传文件不会直接进入切片器。系统先进行格式真实性与安全校验，再通过可插拔 Parser 转换为统一 IR；PDF 以“页”为最小决策单位，正常文本页由 PyMuPDF 解析，仅将扫描页发送给 PaddleOCR。
+
+![文档解析、质量门禁与精细引用链路](docs/assets/document_parse_pipeline.png)
+
+该图展示文件校验、本地 Parser、PDF 逐页 OCR、统一 Document IR、质量门禁、结构感知切片、索引和精细引用的完整数据流。
+
+### 设计要点
+
+- **格式白名单**：第一版支持 TXT、Markdown、DOCX 和 PDF；浏览器 MIME 仅作参考，后端以文件签名和内部结构为准。
+- **逐页 OCR**：文本 PDF 不发送给外部服务；混合 PDF 只把低文本或高异常字符页面组成临时子 PDF 提交 PaddleOCR，并在返回后恢复原始页码。
+- **统一 IR**：所有 Parser 输出 `DocumentIR → PageIR → BlockIR`，Block 保留类型、正文、页码、标题路径、bbox、置信度和元数据。
+- **质量门禁**：保存文本覆盖率、原生文本覆盖率、空白页比例、OCR 页比例、失败页比例、异常字符率、字符数和解析耗时；不达标时必须人工确认，不能静默索引。
+- **版本可追溯**：`DocumentParseRun` 保存解析器、版本、进度、质量与错误；`Chunk.parse_run` 绑定实际索引使用的解析结果。
+- **失败不破坏旧索引**：Embedding 或 Milvus 写入失败时保留旧 Chunk，并尝试恢复旧向量索引。
+- **引用贯穿全链路**：页码、标题路径、段落范围和 block IDs 会经过 Vector、BM25、Hybrid、Rerank、Compression、ChatMessage 与 Trace，不只停留在切片预览。
+
 ## 记忆体系
 
 当前系统有三类记忆，边界要区分清楚：
@@ -190,6 +212,10 @@ Session Summary + 最近几轮消息 + 当前问题
 
 - `/api/knowledge-bases/`
 - `/api/documents/`
+- `POST /api/documents/{id}/parse/`
+- `GET /api/documents/{id}/parse-status/`
+- `GET /api/documents/{id}/parse-preview/?page=N`
+- `POST /api/documents/{id}/accept-parse/`
 - `/api/documents/{id}/chunk-preview/`
 - `/api/documents/{id}/index/`
 - `GET /api/chunk-methods/`
@@ -226,6 +252,8 @@ SQLite `db.sqlite3` 保存业务事实：
 
 - `KnowledgeBase`
 - `Document`
+- `DocumentParseRun`
+- `DocumentPage`
 - `Chunk`
 - `ChatSession`
 - `ChatMessage`
@@ -267,6 +295,11 @@ SESSION_SUMMARY_ENABLED=true
 SESSION_SUMMARY_TRIGGER_MESSAGES=12
 SESSION_SUMMARY_MAX_CHARS=2000
 EVAL_RUN_STALE_TIMEOUT_SECONDS=3600
+PADDLEOCR_JOB_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
+PADDLEOCR_TOKEN=...
+PADDLEOCR_MODEL=PaddleOCR-VL-1.6
+CELERY_BROKER_URL=redis://127.0.0.1:6379/0
+CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/1
 LANGGRAPH_CHECKPOINT_DB=...
 ```
 
@@ -282,6 +315,9 @@ source venv/bin/activate
 pip install -r requirements.txt
 python manage.py migrate
 python manage.py runserver 127.0.0.1:8010
+
+# 另开终端，确保 Redis 已启动
+celery -A assistant_backend worker --loglevel=INFO --concurrency=1
 ```
 
 前端：
@@ -305,7 +341,7 @@ http://localhost:5174
 - `backend/Dockerfile`：Django + Gunicorn，启动时自动执行 `migrate` 和 `collectstatic`。
 - `frontend/Dockerfile`：Node 构建 Vue，Nginx 托管静态文件并反代 API。
 - `deploy/nginx/aiassistant.docker.conf`：容器内 Nginx 网关配置，SSE 接口关闭缓冲。
-- `docker-compose.yml`：编排前端、后端和持久化 volume。
+- `docker-compose.yml`：编排前端、后端、Redis、文档解析 Worker 和持久化 volume。
 
 启动：
 
@@ -324,6 +360,7 @@ http://127.0.0.1:8080
 
 ```bash
 docker compose logs -f backend
+docker compose logs -f parser-worker
 docker compose logs -f frontend
 ```
 

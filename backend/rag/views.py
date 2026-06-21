@@ -24,11 +24,14 @@ from .case_factory import create_regression_case_from_eval_case, create_regressi
 from .eval_runs import reconcile_stale_eval_run, reconcile_stale_eval_runs
 from .experiments import refresh_experiment_plan, start_experiment_plan
 from .chunkers import list_chunk_methods
+from .document_parsing.service import create_parse_run
+from .indexing import ParseRunNotReadyError
 from .models import (
     ChatMessage,
     ChatSession,
     Chunk,
     Document,
+    DocumentParseRun,
     KnowledgeBase,
     ModelCallLog,
     RagAgentAction,
@@ -43,6 +46,8 @@ from .serializers import (
     ChatMessageSerializer,
     ChatSessionSerializer,
     ChunkSerializer,
+    DocumentPageSerializer,
+    DocumentParseRunSerializer,
     DocumentSerializer,
     KnowledgeBaseSerializer,
     ModelCallLogSerializer,
@@ -355,20 +360,85 @@ class DocumentViewSet(viewsets.ModelViewSet):
     serializer_class = DocumentSerializer
 
     def get_queryset(self):
-        return Document.objects.filter(kb__owner=self.request.user).order_by("-created_at")
+        return Document.objects.filter(kb__owner=self.request.user).prefetch_related("parse_runs").order_by("-created_at")
 
     def perform_create(self, serializer):
         uploaded = self.request.FILES.get("file")
-        filename = uploaded.name if uploaded else ""
+        metadata = getattr(serializer, "_validated_file_metadata", {})
+        filename = metadata.get("filename") or (uploaded.name if uploaded else "")
         file_type = Path(filename).suffix.lower().lstrip(".")
-        serializer.save(filename=filename, file_type=file_type, status="uploaded")
+        document = serializer.save(
+            filename=filename,
+            file_type=file_type,
+            mime_type=metadata.get("mime_type", ""),
+            size_bytes=metadata.get("size_bytes", 0),
+            sha256=metadata.get("sha256", ""),
+            status="uploaded",
+        )
+        create_parse_run(document)
+
+    @action(detail=True, methods=["post"], url_path="parse")
+    def parse_document(self, request, pk=None):
+        run = create_parse_run(self.get_object())
+        return Response(DocumentParseRunSerializer(run).data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["get"], url_path="parse-status")
+    def parse_status(self, request, pk=None):
+        document = self.get_object()
+        run = document.parse_runs.order_by("-created_at", "-id").first()
+        if not run:
+            return Response({"detail": "No parse run."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(DocumentParseRunSerializer(run).data)
+
+    @action(detail=True, methods=["get"], url_path="parse-preview")
+    def parse_preview(self, request, pk=None):
+        document = self.get_object()
+        run_id = request.query_params.get("parse_run_id")
+        runs = document.parse_runs.filter(status__in=["completed", "needs_review"])
+        if run_id:
+            runs = runs.filter(id=run_id)
+        run = runs.order_by("-created_at", "-id").first()
+        if not run:
+            return Response({"detail": "解析结果尚不可预览。"}, status=status.HTTP_409_CONFLICT)
+        try:
+            page_number = max(int(request.query_params.get("page") or 1), 1)
+        except (TypeError, ValueError):
+            return Response({"detail": "page must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+        page = run.pages.filter(page_number=page_number).first()
+        if not page:
+            return Response({"detail": "Page not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "parse_run": DocumentParseRunSerializer(run).data,
+            "page_count": run.pages.count(),
+            "page": DocumentPageSerializer(page).data,
+        })
+
+    @action(detail=True, methods=["post"], url_path="accept-parse")
+    def accept_parse(self, request, pk=None):
+        document = self.get_object()
+        run_id = request.data.get("parse_run_id")
+        runs = document.parse_runs.filter(status="needs_review")
+        if run_id:
+            runs = runs.filter(id=run_id)
+        run = runs.order_by("-created_at", "-id").first()
+        if not run:
+            return Response({"detail": "没有待确认的解析结果。"}, status=status.HTTP_409_CONFLICT)
+        run.status = "completed"
+        run.save(update_fields=["status", "updated_at"])
+        document.status = "parsed"
+        document.error_message = ""
+        document.save(update_fields=["status", "error_message", "updated_at"])
+        return Response(DocumentParseRunSerializer(run).data)
 
     @action(detail=True, methods=["post"], url_path="chunk-preview")
     def chunk_preview(self, request, pk=None):
         document = self.get_object()
         method = request.data.get("chunk_method") or "sentence"
         options = request.data.get("options") or {}
-        chunks = preview_chunks(document, method, options)
+        try:
+            chunks = preview_chunks(document, method, options, request.data.get("parse_run_id"))
+        except ParseRunNotReadyError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
         stats = {
             "chunk_count": len(chunks),
             "avg_tokens": round(sum(c["token_count"] for c in chunks) / len(chunks), 2) if chunks else 0,
@@ -382,11 +452,15 @@ class DocumentViewSet(viewsets.ModelViewSet):
         method = request.data.get("chunk_method") or "sentence"
         options = request.data.get("options") or {}
         try:
-            count = index_document(document, method, options)
+            count = index_document(document, method, options, request.data.get("parse_run_id"))
+        except ParseRunNotReadyError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
         except Exception as exc:
-            document.status = "failed"
-            document.error_message = str(exc)
-            document.save(update_fields=["status", "error_message", "updated_at"])
+            document.refresh_from_db()
+            if document.status != "failed":
+                document.status = "failed"
+                document.error_message = str(exc)
+                document.save(update_fields=["status", "error_message", "updated_at"])
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"chunk_count": count, "status": "indexed"})
 

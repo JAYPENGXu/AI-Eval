@@ -41,7 +41,7 @@
         @click="$emit('select-document', doc)"
       >
         <strong>{{ doc.filename }}</strong>
-        <small>{{ doc.status }} · {{ doc.chunk_method }}</small>
+        <small>{{ documentStatus(doc) }} · {{ doc.chunk_method }}</small>
       </el-button>
     </div>
 
@@ -63,6 +63,10 @@ defineProps({
   kbForm: { type: Object, required: true },
   busy: { type: Object, required: true },
 })
+
+function documentStatus(doc) {
+  return { uploaded: '已上传', queued: '等待解析', parsing: '解析中', parsed: '解析完成', needs_review: '待确认', indexing: '索引中', indexed: '已索引', failed: '失败' }[doc.status] || doc.status
+}
 
 defineEmits([
   'create-kb',

@@ -1,4 +1,11 @@
 services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -12,10 +19,14 @@ services:
       SQLITE_DB_PATH: "/app/db_data/db.sqlite3"
       MILVUS_URI: "/app/vector_store/milvus_lite.db"
       LANGGRAPH_CHECKPOINT_DB: "/app/agent_state/langgraph_checkpoints.sqlite3"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
       RAG_STREAM_MAX_ACTIVE_PER_PROCESS: "32"
       GUNICORN_WORKERS: "2"
       GUNICORN_THREADS: "8"
       GUNICORN_TIMEOUT: "3600"
+    depends_on:
+      - redis
     volumes:
       - backend_db:/app/db_data
       - backend_media:/app/media
@@ -28,6 +39,29 @@ services:
       nofile:
         soft: 65535
         hard: 65535
+    restart: unless-stopped
+
+  parser-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - backend/.env
+    environment:
+      DEBUG: "false"
+      SQLITE_DB_PATH: "/app/db_data/db.sqlite3"
+      MILVUS_URI: "/app/vector_store/milvus_lite.db"
+      LANGGRAPH_CHECKPOINT_DB: "/app/agent_state/langgraph_checkpoints.sqlite3"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+    command: celery -A assistant_backend worker --loglevel=INFO --concurrency=1 --queues=celery
+    depends_on:
+      - redis
+    volumes:
+      - backend_db:/app/db_data
+      - backend_media:/app/media
+      - backend_vector_store:/app/vector_store
+      - backend_agent_state:/app/agent_state
     restart: unless-stopped
 
   frontend:
@@ -51,3 +85,4 @@ volumes:
   backend_static:
   backend_vector_store:
   backend_agent_state:
+  redis_data:

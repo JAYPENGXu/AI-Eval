@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import ChatMessage, ChatSession, ChatSessionSummary, Chunk, Document, KnowledgeBase, ModelCallLog
+from .models import ChatMessage, ChatSession, ChatSessionSummary, Chunk, Document, DocumentPage, DocumentParseRun, KnowledgeBase, ModelCallLog
 
 
 @admin.register(KnowledgeBase)
@@ -40,3 +40,16 @@ class ModelCallLogAdmin(admin.ModelAdmin):
     list_filter = ("status", "call_type", "model")
     search_fields = ("model", "error_message", "trace__question")
     readonly_fields = ("created_at",)
+
+
+@admin.register(DocumentParseRun)
+class DocumentParseRunAdmin(admin.ModelAdmin):
+    list_display = ("id", "document", "status", "parser", "quality_score", "progress_current", "progress_total", "created_at")
+    list_filter = ("status", "parser")
+    search_fields = ("document__filename", "provider_job_id", "error_message")
+
+
+@admin.register(DocumentPage)
+class DocumentPageAdmin(admin.ModelAdmin):
+    list_display = ("id", "parse_run", "page_number", "extraction_method", "char_count", "is_blank")
+    list_filter = ("extraction_method", "is_blank")

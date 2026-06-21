@@ -1,12 +1,15 @@
 from django.contrib.auth.models import User
 from rest_framework import serializers
 
+from .document_parsing.validation import DocumentValidationError, validate_document_file
 from .models import (
     ChatMessage,
     ChatSession,
     ChatSessionSummary,
     Chunk,
     Document,
+    DocumentPage,
+    DocumentParseRun,
     KnowledgeBase,
     ModelCallLog,
     RagAgentAction,
@@ -56,27 +59,51 @@ class OwnedKnowledgeBaseRelatedField(serializers.PrimaryKeyRelatedField):
         return KnowledgeBase.objects.none()
 
 
+class DocumentParseRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentParseRun
+        fields = [
+            "id", "status", "parser", "parser_version", "progress_current", "progress_total",
+            "quality_score", "quality_metrics", "error_code", "error_message", "started_at",
+            "finished_at", "created_at", "updated_at",
+        ]
+
+
+class DocumentPageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentPage
+        fields = [
+            "page_number", "extraction_method", "text", "markdown", "blocks",
+            "char_count", "is_blank", "metrics",
+        ]
+
+
 class DocumentSerializer(serializers.ModelSerializer):
     kb = OwnedKnowledgeBaseRelatedField()
     chunk_count = serializers.IntegerField(source="chunks.count", read_only=True)
+    latest_parse = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
         fields = [
-            "id",
-            "kb",
-            "filename",
-            "file",
-            "file_type",
-            "status",
-            "chunk_method",
-            "chunk_options",
-            "chunk_count",
-            "error_message",
-            "created_at",
-            "updated_at",
+            "id", "kb", "filename", "file", "file_type", "mime_type", "size_bytes", "sha256",
+            "status", "chunk_method", "chunk_options", "chunk_count", "latest_parse",
+            "error_message", "created_at", "updated_at",
         ]
-        read_only_fields = ["filename", "file_type", "status", "error_message"]
+        read_only_fields = [
+            "filename", "file_type", "mime_type", "size_bytes", "sha256", "status", "error_message"
+        ]
+
+    def validate_file(self, value):
+        try:
+            self._validated_file_metadata = validate_document_file(value)
+        except DocumentValidationError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+        return value
+
+    def get_latest_parse(self, obj):
+        run = obj.parse_runs.order_by("-created_at", "-id").first()
+        return DocumentParseRunSerializer(run).data if run else None
 
 
 class ChunkSerializer(serializers.ModelSerializer):

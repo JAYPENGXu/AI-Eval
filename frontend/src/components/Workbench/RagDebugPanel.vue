@@ -108,6 +108,7 @@
               <article v-for="item in latestTrace.bm25_results" :key="item.chunk_id" class="trace-item">
                 <div class="trace-item-head">
                   <strong>#{{ item.rank }} · {{ item.document }}</strong>
+                  <small v-if="sourceLocation(item)" class="source-location">{{ sourceLocation(item) }}</small>
                   <span>{{ item.engine }} · {{ formatScore(item.score) }}</span>
                 </div>
                 <div v-if="item.matched_terms?.length" class="matched-terms">
@@ -123,6 +124,7 @@
               <article v-for="item in latestTrace.hybrid_results" :key="item.chunk_id" class="trace-item">
                 <div class="trace-item-head">
                   <strong>#{{ item.rank }} · {{ item.document }}</strong>
+                  <small v-if="sourceLocation(item)" class="source-location">{{ sourceLocation(item) }}</small>
                   <span>{{ item.engine }} · {{ formatScore(item.rrf_score || item.score) }}</span>
                 </div>
                 <div class="matched-terms">
@@ -139,6 +141,7 @@
               <article v-for="item in latestTrace.rerank_results" :key="item.chunk_id" class="trace-item">
                 <div class="trace-item-head">
                   <strong>#{{ item.rank }} · {{ item.document }}</strong>
+                  <small v-if="sourceLocation(item)" class="source-location">{{ sourceLocation(item) }}</small>
                   <span>{{ item.engine }} · {{ formatScore(item.rerank_score || item.score) }}</span>
                 </div>
                 <div class="matched-terms">
@@ -155,6 +158,7 @@
               <article v-for="item in latestTrace.vector_results" :key="item.chunk_id" class="trace-item">
                 <div class="trace-item-head">
                   <strong>#{{ item.rank }} · {{ item.document }}</strong>
+                  <small v-if="sourceLocation(item)" class="source-location">{{ sourceLocation(item) }}</small>
                   <span>{{ item.engine }} · {{ formatScore(item.score) }}</span>
                 </div>
                 <p>{{ item.content }}</p>
@@ -172,6 +176,7 @@
               <article v-for="item in latestTrace.compression_results" :key="item.chunk_id" class="trace-item">
                 <div class="trace-item-head">
                   <strong>#{{ item.rank }} · {{ item.document }}</strong>
+                  <small v-if="sourceLocation(item)" class="source-location">{{ sourceLocation(item) }}</small>
                   <span>{{ item.original_tokens }} -> {{ item.compressed_tokens }} tokens</span>
                 </div>
                 <div class="compression-columns">
@@ -259,6 +264,10 @@ function formatConversationContext(messages = []) {
   if (!Array.isArray(messages) || !messages.length) return '无'
   const roleMap = { user: '用户', assistant: '助手' }
   return messages.map((item) => `${roleMap[item.role] || item.role}：${item.content}`).join('\n')
+}
+
+function sourceLocation(item) {
+  return item?.location?.label || ''
 }
 
 defineEmits(['update:collapse-value'])

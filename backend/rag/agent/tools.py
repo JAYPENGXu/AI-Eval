@@ -26,6 +26,7 @@ def compact_sources(items: list[dict], limit: int = 5) -> list[dict]:
                 "content": compact_text(item.get("content"), 700),
                 "matched_terms": item.get("matched_terms") or [],
                 "sources": item.get("sources") or {},
+                "location": item.get("location") or {},
                 "original_tokens": item.get("original_tokens"),
                 "compressed_tokens": item.get("compressed_tokens"),
                 "compression_ratio": item.get("compression_ratio"),

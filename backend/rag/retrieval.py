@@ -8,6 +8,7 @@ from django.conf import settings
 
 from .indexing import embed_texts
 from .models import Chunk, KnowledgeBase
+from .source_metadata import source_location
 from .vector_store import get_vector_store
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ def format_source(chunk: Chunk, score: float, rank: int, engine: str) -> dict:
         "engine": engine,
         "content": chunk.content,
         "metadata": chunk.metadata,
+        "location": source_location(chunk.metadata),
     }
 
 

@@ -1,8 +1,8 @@
 import math
 from collections import Counter
 
-from .base import BaseChunker, ChunkItem, ChunkOptions, make_chunk, rough_token_count
-from .sentence import split_sentences
+from .base import BaseChunker, ChunkItem, ChunkOptions, flatten_document, make_chunk, provenance, rough_token_count
+from .sentence import split_sentences_with_offsets
 
 
 def char_vector(text: str) -> Counter:
@@ -23,32 +23,30 @@ class SemanticChunker(BaseChunker):
     method = "semantic"
     label = "语义切片"
 
-    def split(self, text: str, options: ChunkOptions) -> list[ChunkItem]:
-        sentences = split_sentences(text)
+    def split(self, document, options: ChunkOptions) -> list[ChunkItem]:
+        document_ir, text, spans = flatten_document(document)
+        sentences = split_sentences_with_offsets(text)
         if not sentences:
             return []
-
         chunks: list[ChunkItem] = []
         current = [sentences[0]]
         threshold = options.semantic_threshold
 
+        def append_current(reason=None):
+            start, end = current[0][1], current[-1][2]
+            metadata = provenance(document_ir, spans, start, end)
+            if reason:
+                metadata["split_reason"] = reason
+            chunks.append(make_chunk(len(chunks), "\n".join(item[0] for item in current), self.method, **metadata))
+
         for sentence in sentences[1:]:
-            current_text = "\n".join(current)
-            similarity = cosine(char_vector(current_text), char_vector(sentence))
-            would_exceed = rough_token_count(current_text + sentence) > options.chunk_size
-            if current and (similarity < threshold or would_exceed):
-                chunks.append(
-                    make_chunk(
-                        len(chunks),
-                        current_text,
-                        self.method,
-                        split_reason="semantic_boundary" if similarity < threshold else "chunk_size",
-                    )
-                )
+            current_text = "\n".join(item[0] for item in current)
+            similarity = cosine(char_vector(current_text), char_vector(sentence[0]))
+            would_exceed = rough_token_count(current_text + sentence[0]) > options.chunk_size
+            if similarity < threshold or would_exceed:
+                append_current("semantic_boundary" if similarity < threshold else "chunk_size")
                 current = [sentence]
             else:
                 current.append(sentence)
-
-        if current:
-            chunks.append(make_chunk(len(chunks), "\n".join(current), self.method))
+        append_current()
         return chunks

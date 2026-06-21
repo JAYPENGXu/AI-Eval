@@ -7,6 +7,7 @@ from collections import Counter
 from django.conf import settings
 
 from .models import Chunk, KnowledgeBase
+from .source_metadata import source_location
 
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
@@ -60,6 +61,7 @@ def bm25_search(kb: KnowledgeBase, question: str, top_k: int | None = None) -> l
             "engine": "bm25",
             "content": chunk.content,
             "metadata": chunk.metadata,
+            "location": source_location(chunk.metadata),
         }
         item["matched_terms"] = matched_terms
         results.append(item)

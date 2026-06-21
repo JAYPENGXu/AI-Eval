@@ -54,8 +54,12 @@
               :action-error="actionError"
               :stats="stats"
               :chunks="chunks"
+              :parse-preview="parsePreview"
               @preview="preview"
               @index-document="indexDoc"
+              @reparse="reparseDocument"
+              @accept-parse="acceptParse"
+              @load-parse-page="loadParsePreview"
             />
 
             <RagDebugPanel
@@ -237,7 +241,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { api } from './api'
 import { useAuthStore } from './stores/auth'
-import { getErrorMessage, shouldIgnoreRequestError } from './composables/polling'
+import { getErrorMessage, shouldIgnoreRequestError, sleep } from './composables/polling'
 import AuthManager from './components/AuthManager.vue'
 import RagChatPanel from './components/Chat/RagChatPanel.vue'
 import AppSidebar from './components/Sidebar/AppSidebar.vue'
@@ -276,6 +280,8 @@ const chunkMethods = ref([])
 const selectedKb = ref(null)
 const selectedDocument = ref(null)
 const chunks = ref([])
+const parsePreview = ref(null)
+let parsePollGeneration = 0
 const stats = reactive({})
 const notice = ref('')
 const actionError = ref('')
@@ -303,6 +309,8 @@ const busy = reactive({
   preview: false,
   index: false,
   upload: false,
+  parse: false,
+  acceptParse: false,
   reset: false,
   eval: false,
   evalLoad: false,
@@ -1003,9 +1011,56 @@ function selectKb(kb) {
 }
 
 function selectDocument(doc) {
+  parsePollGeneration += 1
   selectedDocument.value = doc
   chunks.value = []
+  parsePreview.value = null
   Object.keys(stats).forEach((key) => delete stats[key])
+  const status = doc?.latest_parse?.status
+  if (['completed', 'needs_review'].includes(status)) {
+    loadParsePreview(1)
+  } else if (['queued', 'running'].includes(status)) {
+    pollDocumentParse(doc.id)
+  }
+}
+
+async function refreshSelectedDocument(documentId) {
+  documents.value = await api.listDocuments()
+  const current = documents.value.find((doc) => doc.id === documentId)
+  if (current && selectedDocument.value?.id === documentId) selectedDocument.value = current
+  return current
+}
+
+async function pollDocumentParse(documentId) {
+  const generation = ++parsePollGeneration
+  while (generation === parsePollGeneration && selectedDocument.value?.id === documentId) {
+    try {
+      await sleep(2000)
+      const current = await refreshSelectedDocument(documentId)
+      const status = current?.latest_parse?.status
+      if (!['queued', 'running'].includes(status)) {
+        if (['completed', 'needs_review'].includes(status)) await loadParsePreview(1)
+        if (status === 'failed') actionError.value = current?.latest_parse?.error_message || '文档解析失败'
+        return
+      }
+    } catch (err) {
+      if (!shouldIgnoreRequestError(err)) actionError.value = getErrorMessage(err)
+      return
+    }
+  }
+}
+
+async function loadParsePreview(page = 1) {
+  if (!selectedDocument.value?.latest_parse?.id) return
+  try {
+    parsePreview.value = await api.getParsePreview(
+      selectedDocument.value.id,
+      Number(page),
+      selectedDocument.value.latest_parse.id,
+    )
+  } catch (err) {
+    if (!shouldIgnoreRequestError(err)) actionError.value = getErrorMessage(err)
+  }
 }
 
 async function upload(payload) {
@@ -1016,16 +1071,52 @@ async function upload(payload) {
     const doc = await api.uploadDocument(selectedKb.value.id, file)
     documents.value.unshift(doc)
     selectedDocument.value = doc
-    notice.value = `已上传文档：${doc.filename}`
+    parsePreview.value = null
+    notice.value = `已上传文档：${doc.filename}，解析任务已进入队列`
+    pollDocumentParse(doc.id)
   })
   busy.upload = false
+}
+
+async function reparseDocument() {
+  if (!selectedDocument.value) return
+  busy.parse = true
+  actionError.value = ''
+  try {
+    const run = await api.parseDocument(selectedDocument.value.id)
+    selectedDocument.value = { ...selectedDocument.value, status: 'queued', latest_parse: run }
+    parsePreview.value = null
+    notice.value = '文档重新解析任务已进入队列'
+    pollDocumentParse(selectedDocument.value.id)
+  } catch (err) {
+    actionError.value = getErrorMessage(err)
+  } finally {
+    busy.parse = false
+  }
+}
+
+async function acceptParse() {
+  if (!selectedDocument.value?.latest_parse?.id) return
+  busy.acceptParse = true
+  actionError.value = ''
+  try {
+    const run = await api.acceptParse(selectedDocument.value.id, selectedDocument.value.latest_parse.id)
+    selectedDocument.value = { ...selectedDocument.value, status: 'parsed', latest_parse: run }
+    documents.value = documents.value.map((doc) => doc.id === selectedDocument.value.id ? selectedDocument.value : doc)
+    notice.value = '已确认解析结果，可以进行切片与索引'
+  } catch (err) {
+    actionError.value = getErrorMessage(err)
+  } finally {
+    busy.acceptParse = false
+  }
 }
 
 async function preview() {
   if (!selectedDocument.value) return
   await runAction(async () => {
     busy.preview = true
-    const data = await api.previewChunks(selectedDocument.value.id, chunkForm)
+    const payload = { ...chunkForm, parse_run_id: selectedDocument.value.latest_parse?.id }
+    const data = await api.previewChunks(selectedDocument.value.id, payload)
     chunks.value = data.chunks
     Object.assign(stats, data.stats)
     notice.value = `已生成 ${data.stats.chunk_count} 个切片预览`
@@ -1038,9 +1129,9 @@ async function indexDoc() {
   const documentId = selectedDocument.value.id
   await runAction(async () => {
     busy.index = true
-    const result = await api.indexDocument(documentId, chunkForm)
-    documents.value = await api.listDocuments()
-    selectedDocument.value = documents.value.find((doc) => doc.id === documentId) || selectedDocument.value
+    const payload = { ...chunkForm, parse_run_id: selectedDocument.value.latest_parse?.id }
+    const result = await api.indexDocument(documentId, payload)
+    await refreshSelectedDocument(documentId)
     notice.value = `索引完成：${result.chunk_count} 个切片已入库`
     await preview()
   })
@@ -1048,6 +1139,7 @@ async function indexDoc() {
 }
 
 onBeforeUnmount(() => {
+  parsePollGeneration += 1
   stopResize()
 })
 </script>
