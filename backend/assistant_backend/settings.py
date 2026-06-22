@@ -202,6 +202,17 @@ CELERY_TASK_PUBLISH_RETRY = False
 CELERY_BROKER_TRANSPORT_OPTIONS = {"socket_connect_timeout": 2, "socket_timeout": 5}
 CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
 CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_TASK_DEFAULT_QUEUE = "orchestration"
+CELERY_TASK_ROUTES = {
+    "rag.parse_document": {"queue": "documents"},
+    "rag.index_document": {"queue": "documents"},
+    "rag.run_eval": {"queue": "evaluations"},
+    "rag.parse_eval": {"queue": "evaluations"},
+    "rag.session_summary": {"queue": "summaries"},
+    "rag.finalize_experiment": {"queue": "orchestration"},
+}
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_ACKS_LATE = True
 
 class ExactLevelFilter(logging.Filter):
     def __init__(self, level_name):

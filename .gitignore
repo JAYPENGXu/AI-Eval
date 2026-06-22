@@ -11,3 +11,7 @@ frontend/.vite/
 .env
 .logs/
 backend/agent_state/
+backend/.celery-*.pid
+backend/.pytest_tmp/
+frontend/playwright-report/
+frontend/test-results/

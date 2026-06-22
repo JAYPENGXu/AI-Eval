@@ -6,6 +6,7 @@ import { costApi } from './costs'
 import { documentApi } from './documents'
 import { evaluationApi } from './evaluations'
 import { feedbackApi } from './feedback'
+import { operationsApi } from './operations'
 import { knowledgeBaseApi } from './knowledgeBases'
 import { traceApi } from './traces'
 import { workspaceApi } from './workspace'
@@ -22,6 +23,7 @@ export const api = {
   ...costApi,
   ...agentApi,
   ...workspaceApi,
+  ...operationsApi,
 }
 
 export type ApiClient = typeof api

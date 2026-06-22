@@ -8,8 +8,12 @@ from .models import (
     ChatSessionSummary,
     Chunk,
     Document,
+    DocumentIndexRun,
     DocumentPage,
     DocumentParseRun,
+    DocumentParseBenchmarkCase,
+    DocumentParseEvalCaseResult,
+    DocumentParseEvalRun,
     KnowledgeBase,
     ModelCallLog,
     RagAgentAction,
@@ -18,6 +22,8 @@ from .models import (
     RagEvalRun,
     RagExperimentPlan,
     RagExperimentVariant,
+    RagConfigDeployment,
+    RagConfigVersion,
     RagTrace,
     RagUserFeedback,
 )
@@ -35,9 +41,18 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class KnowledgeBaseSerializer(serializers.ModelSerializer):
+    active_config = serializers.SerializerMethodField()
+
     class Meta:
         model = KnowledgeBase
-        fields = ["id", "name", "description", "created_at", "updated_at"]
+        fields = ["id", "name", "description", "active_config_version", "active_config", "created_at", "updated_at"]
+        read_only_fields = ["active_config_version", "active_config"]
+
+    def get_active_config(self, obj):
+        version = obj.active_config_version
+        if not version:
+            return None
+        return {"id": version.id, "version": version.version, "signature": version.signature, "payload": version.payload}
 
 
 class OwnedKnowledgeBaseRelatedField(serializers.PrimaryKeyRelatedField):
@@ -69,6 +84,13 @@ class DocumentParseRunSerializer(serializers.ModelSerializer):
         ]
 
 
+class DocumentIndexRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentIndexRun
+        fields = ["id", "document", "parse_run", "status", "celery_task_id", "chunk_method", "chunk_options", "target_signature", "progress_current", "progress_total", "chunk_count", "retry_count", "error_message", "started_at", "heartbeat_at", "finished_at", "created_at", "updated_at"]
+        read_only_fields = fields
+
+
 class DocumentPageSerializer(serializers.ModelSerializer):
     class Meta:
         model = DocumentPage
@@ -88,7 +110,7 @@ class DocumentSerializer(serializers.ModelSerializer):
         fields = [
             "id", "kb", "filename", "file", "file_type", "mime_type", "size_bytes", "sha256",
             "status", "chunk_method", "chunk_options", "chunk_count", "latest_parse",
-            "error_message", "created_at", "updated_at",
+            "index_signature", "index_manifest", "indexed_at", "error_message", "created_at", "updated_at",
         ]
         read_only_fields = [
             "filename", "file_type", "mime_type", "size_bytes", "sha256", "status", "error_message"
@@ -448,6 +470,7 @@ class RagEvalCaseResultSerializer(serializers.ModelSerializer):
             "diagnostics",
             "deterministic_results",
             "judge_results",
+            "execution_metrics",
             "error_message",
             "created_at",
         ]
@@ -474,6 +497,7 @@ class RagEvalRunListSerializer(serializers.ModelSerializer):
             "case_count",
             "cases_path",
             "error_message",
+            "celery_task_id", "retry_count", "heartbeat_at", "execution_metrics",
             "started_at",
             "finished_at",
             "created_at",
@@ -502,6 +526,7 @@ class RagEvalRunDetailSerializer(serializers.ModelSerializer):
             "case_count",
             "cases_path",
             "error_message",
+            "celery_task_id", "retry_count", "heartbeat_at", "execution_metrics",
             "started_at",
             "finished_at",
             "created_at",
@@ -588,3 +613,56 @@ class ModelCallLogSerializer(serializers.ModelSerializer):
             "metadata",
             "created_at",
         ]
+
+
+class RagConfigVersionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RagConfigVersion
+        fields = ["id", "kb", "version", "payload", "signature", "source", "validation_status", "parent", "experiment_plan", "winner_variant", "release_eval_run", "created_by", "created_at"]
+        read_only_fields = fields
+
+
+class RagConfigDeploymentSerializer(serializers.ModelSerializer):
+    target_version_number = serializers.IntegerField(source="target_version.version", read_only=True)
+    previous_version_number = serializers.IntegerField(source="previous_version.version", read_only=True)
+
+    class Meta:
+        model = RagConfigDeployment
+        fields = ["id", "kb", "previous_version", "previous_version_number", "target_version", "target_version_number", "action", "operation", "reason", "deployed_by", "created_at"]
+        read_only_fields = fields
+
+
+class DocumentParseBenchmarkCaseSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentParseBenchmarkCase
+        fields = ["id", "case_id", "title", "file", "suite", "tags", "expected_page_count", "expected_ocr_pages", "expected_headings", "expected_terms_by_page", "expected_block_types", "expected_table_terms", "thresholds", "enabled", "created_at", "updated_at"]
+        read_only_fields = ["created_at", "updated_at"]
+        extra_kwargs = {"enabled": {"default": True}}
+
+    def validate_case_id(self, value):
+        value = value.strip()
+        if not value: raise serializers.ValidationError("case_id is required.")
+        return value
+
+    def validate_file(self, value):
+        try:
+            validate_document_file(value)
+        except DocumentValidationError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+        return value
+
+
+class DocumentParseEvalCaseResultSerializer(serializers.ModelSerializer):
+    case_id = serializers.CharField(source="case.case_id", read_only=True)
+    title = serializers.CharField(source="case.title", read_only=True)
+    class Meta:
+        model = DocumentParseEvalCaseResult
+        fields = ["id", "case", "case_id", "title", "passed", "metrics", "checks", "error_message", "duration_ms", "created_at"]
+
+
+class DocumentParseEvalRunSerializer(serializers.ModelSerializer):
+    case_results = DocumentParseEvalCaseResultSerializer(many=True, read_only=True)
+    class Meta:
+        model = DocumentParseEvalRun
+        fields = ["id", "suite", "status", "celery_task_id", "case_count", "passed_count", "summary", "error_message", "started_at", "finished_at", "created_at", "case_results"]
+        read_only_fields = fields

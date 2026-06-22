@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.utils import timezone
+from django.db.models import Q
 
 from .models import RagEvalRun
 
@@ -21,9 +22,9 @@ def eval_run_stale_cutoff():
 
 
 def is_stale_eval_run(run: RagEvalRun, *, cutoff=None) -> bool:
-    if run.status != "running" or run.finished_at:
+    if run.status not in {"queued", "running"} or run.finished_at:
         return False
-    started_at = run.started_at or run.created_at
+    started_at = run.heartbeat_at or run.started_at or run.created_at
     if not started_at:
         return False
     return started_at < (cutoff or eval_run_stale_cutoff())
@@ -32,9 +33,12 @@ def is_stale_eval_run(run: RagEvalRun, *, cutoff=None) -> bool:
 def reconcile_stale_eval_runs(*, owner=None, kb_id=None) -> int:
     cutoff = eval_run_stale_cutoff()
     queryset = RagEvalRun.objects.filter(
-        status="running",
+        status__in=["queued", "running"],
         finished_at__isnull=True,
-        started_at__lt=cutoff,
+    ).filter(
+        Q(heartbeat_at__lt=cutoff)
+        | Q(heartbeat_at__isnull=True, started_at__lt=cutoff)
+        | Q(heartbeat_at__isnull=True, started_at__isnull=True, created_at__lt=cutoff)
     )
     if owner is not None:
         queryset = queryset.filter(kb__owner=owner)
@@ -53,7 +57,7 @@ def reconcile_stale_eval_runs(*, owner=None, kb_id=None) -> int:
 def reconcile_stale_eval_run(run: RagEvalRun) -> RagEvalRun:
     if not is_stale_eval_run(run):
         return run
-    updated = RagEvalRun.objects.filter(id=run.id, status="running", finished_at__isnull=True).update(
+    updated = RagEvalRun.objects.filter(id=run.id, status__in=["queued", "running"], finished_at__isnull=True).update(
         status="failed",
         error_message=STALE_EVAL_ERROR_MESSAGE,
         finished_at=timezone.now(),

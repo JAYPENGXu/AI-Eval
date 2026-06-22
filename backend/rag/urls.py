@@ -4,15 +4,22 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ChatSessionViewSet,
     DocumentViewSet,
+    DocumentParseBenchmarkCaseViewSet,
+    DocumentParseEvalRunViewSet,
     KnowledgeBaseViewSet,
     RagAgentActionViewSet,
     RagBenchmarkCaseViewSet,
     RagEvalRunViewSet,
     RagExperimentPlanViewSet,
+    RagConfigVersionViewSet,
+    RagConfigDeploymentViewSet,
     RagTraceViewSet,
     RagUserFeedbackViewSet,
     RegisterView,
     chunk_methods,
+    health_live,
+    health_ready,
+    system_health,
     me,
     ragops_agent_run,
     ragops_agent_state,
@@ -31,8 +38,15 @@ router.register("rag-agent-actions", RagAgentActionViewSet, basename="rag-agent-
 router.register("rag-user-feedback", RagUserFeedbackViewSet, basename="rag-user-feedback")
 router.register("rag-eval-runs", RagEvalRunViewSet, basename="rag-eval-run")
 router.register("rag-experiment-plans", RagExperimentPlanViewSet, basename="rag-experiment-plan")
+router.register("document-parse-cases", DocumentParseBenchmarkCaseViewSet, basename="document-parse-case")
+router.register("document-parse-eval-runs", DocumentParseEvalRunViewSet, basename="document-parse-eval-run")
+router.register("rag-config-versions", RagConfigVersionViewSet, basename="rag-config-version")
+router.register("rag-config-deployments", RagConfigDeploymentViewSet, basename="rag-config-deployment")
 
 urlpatterns = [
+    path("health/live/", health_live),
+    path("health/ready/", health_ready),
+    path("system-health/", system_health),
     path("auth/register/", RegisterView.as_view()),
     path("auth/me/", me),
     path("chunk-methods/", chunk_methods),

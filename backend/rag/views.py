@@ -6,8 +6,6 @@ import uuid
 from pathlib import Path
 
 from django.contrib.auth.models import User
-from django.core.management import call_command
-from django.db import close_old_connections
 from django.conf import settings
 from django.db.models import Avg, Count, Q, Sum
 from django.http import StreamingHttpResponse
@@ -26,12 +24,17 @@ from .experiments import refresh_experiment_plan, start_experiment_plan
 from .chunkers import list_chunk_methods
 from .document_parsing.service import create_parse_run
 from .indexing import ParseRunNotReadyError
+from .index_lifecycle import create_index_run, index_health
+from .health import health_report
 from .models import (
     ChatMessage,
     ChatSession,
     Chunk,
     Document,
+    DocumentIndexRun,
     DocumentParseRun,
+    DocumentParseBenchmarkCase,
+    DocumentParseEvalRun,
     KnowledgeBase,
     ModelCallLog,
     RagAgentAction,
@@ -39,6 +42,8 @@ from .models import (
     RagEvalCaseResult,
     RagEvalRun,
     RagExperimentPlan,
+    RagConfigDeployment,
+    RagConfigVersion,
     RagTrace,
     RagUserFeedback,
 )
@@ -47,7 +52,10 @@ from .serializers import (
     ChatSessionSerializer,
     ChunkSerializer,
     DocumentPageSerializer,
+    DocumentIndexRunSerializer,
     DocumentParseRunSerializer,
+    DocumentParseBenchmarkCaseSerializer,
+    DocumentParseEvalRunSerializer,
     DocumentSerializer,
     KnowledgeBaseSerializer,
     ModelCallLogSerializer,
@@ -56,12 +64,14 @@ from .serializers import (
     RagEvalRunDetailSerializer,
     RagEvalRunListSerializer,
     RagExperimentPlanSerializer,
+    RagConfigDeploymentSerializer,
+    RagConfigVersionSerializer,
     RagTraceDetailSerializer,
     RagTraceListSerializer,
     RagUserFeedbackSerializer,
     RegisterSerializer,
 )
-from .services import answer_question, index_document, preview_chunks, stream_answer_events
+from .services import answer_question, preview_chunks, stream_answer_events
 from .vector_store import get_vector_store
 
 RAGAS_DEFAULT_METRICS = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
@@ -299,6 +309,7 @@ def reset_workspace(request):
     documents = list(Document.objects.filter(kb__owner=request.user).only("id", "file"))
     document_ids = [document.id for document in documents]
     deleted_files = 0
+    parse_cases = list(DocumentParseBenchmarkCase.objects.filter(owner=request.user).only("id", "file"))
 
     get_vector_store().delete_documents(document_ids)
 
@@ -310,7 +321,19 @@ def reset_workspace(request):
             except FileNotFoundError:
                 pass
 
+    for case in parse_cases:
+        if case.file:
+            try:
+                case.file.delete(save=False)
+                deleted_files += 1
+            except FileNotFoundError:
+                pass
+
     with transaction.atomic():
+        parse_case_count = len(parse_cases)
+        parse_eval_run_count = DocumentParseEvalRun.objects.filter(owner=request.user).count()
+        DocumentParseEvalRun.objects.filter(owner=request.user).delete()
+        DocumentParseBenchmarkCase.objects.filter(owner=request.user).delete()
         message_count = ChatMessage.objects.filter(session__owner=request.user).count()
         session_count = ChatSession.objects.filter(owner=request.user).count()
         chunk_count = Chunk.objects.filter(kb__owner=request.user).count()
@@ -337,6 +360,8 @@ def reset_workspace(request):
                 "rag_benchmark_cases": benchmark_case_count,
                 "rag_eval_runs": eval_run_count,
                 "rag_eval_case_results": eval_case_count,
+                "document_parse_cases": parse_case_count,
+                "document_parse_eval_runs": parse_eval_run_count,
                 "model_call_logs": model_call_count,
                 "rag_agent_actions": agent_action_count,
                 "uploaded_files": deleted_files,
@@ -346,6 +371,25 @@ def reset_workspace(request):
     )
 
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def health_live(request):
+    return Response({"status": "ok"})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def health_ready(request):
+    report = health_report(detailed=False)
+    return Response(report, status=status.HTTP_200_OK if report["ready"] else status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+@api_view(["GET"])
+def system_health(request):
+    report = health_report(detailed=True)
+    return Response(report, status=status.HTTP_200_OK if report["ready"] else status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
 class KnowledgeBaseViewSet(viewsets.ModelViewSet):
     serializer_class = KnowledgeBaseSerializer
 
@@ -353,7 +397,23 @@ class KnowledgeBaseViewSet(viewsets.ModelViewSet):
         return KnowledgeBase.objects.filter(owner=self.request.user).order_by("-created_at")
 
     def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
+        kb = serializer.save(owner=self.request.user)
+        from .config_versions import ensure_initial_config
+        ensure_initial_config(kb, self.request.user)
+
+    @action(detail=True, methods=["get"], url_path="index-health")
+    def index_health_view(self, request, pk=None):
+        kb = self.get_object()
+        documents = [index_health(document) for document in kb.documents.all()]
+        return Response({"kb": kb.id, "stale_count": sum(item["stale"] for item in documents), "critical": any(item["critical"] for item in documents), "documents": documents})
+
+    @action(detail=True, methods=["post"], url_path="reindex-stale")
+    def reindex_stale(self, request, pk=None):
+        kb = self.get_object(); runs = []
+        for document in kb.documents.all():
+            if index_health(document)["stale"] and document.parse_runs.filter(status="completed").exists():
+                runs.append(create_index_run(document, document.chunk_method, document.chunk_options))
+        return Response(DocumentIndexRunSerializer(runs, many=True).data, status=status.HTTP_202_ACCEPTED)
 
 
 class DocumentViewSet(viewsets.ModelViewSet):
@@ -380,6 +440,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="parse")
     def parse_document(self, request, pk=None):
         run = create_parse_run(self.get_object())
+        run.refresh_from_db()
+        if run.status == "failed" and run.error_code == "queue_unavailable":
+            return Response(DocumentParseRunSerializer(run).data, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(DocumentParseRunSerializer(run).data, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=["get"], url_path="parse-status")
@@ -449,20 +512,22 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def index(self, request, pk=None):
         document = self.get_object()
-        method = request.data.get("chunk_method") or "sentence"
-        options = request.data.get("options") or {}
         try:
-            count = index_document(document, method, options, request.data.get("parse_run_id"))
+            run = create_index_run(
+                document, request.data.get("chunk_method") or "sentence",
+                request.data.get("options") or {}, request.data.get("parse_run_id"),
+            )
         except ParseRunNotReadyError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
-        except Exception as exc:
-            document.refresh_from_db()
-            if document.status != "failed":
-                document.status = "failed"
-                document.error_message = str(exc)
-                document.save(update_fields=["status", "error_message", "updated_at"])
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({"chunk_count": count, "status": "indexed"})
+        except RuntimeError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(DocumentIndexRunSerializer(run).data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["get"], url_path="index-status")
+    def index_status(self, request, pk=None):
+        document = self.get_object()
+        run = document.index_runs.order_by("-created_at", "-id").first()
+        return Response({"run": DocumentIndexRunSerializer(run).data if run else None, "health": index_health(document)})
 
     @action(detail=True, methods=["get"])
     def chunks(self, request, pk=None):
@@ -747,6 +812,9 @@ class RagAgentActionViewSet(viewsets.ReadOnlyModelViewSet):
             execute_agent_action(user=request.user, action=action_obj)
             action_obj.refresh_from_db()
         except Exception as exc:
+            RagAgentAction.objects.filter(id=action_obj.id).exclude(status="completed").update(
+                status="failed", error_message=str(exc), completed_at=timezone.now()
+            )
             action_obj.refresh_from_db()
             return Response(RagAgentActionSerializer(action_obj).data, status=status.HTTP_400_BAD_REQUEST)
         return Response(RagAgentActionSerializer(action_obj).data)
@@ -1011,28 +1079,110 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
         eval_run = RagEvalRun.objects.create(
             kb=kb,
             baseline_run=baseline_run,
-            status="running",
+            status="queued",
             metrics=RAGAS_DEFAULT_METRICS,
             settings={
-                "trigger": "api_background_thread",
+                "trigger": "celery",
                 "requested_options": command_options,
             },
             case_count=0,
         )
-        command_options["run_id"] = eval_run.id
-
-        def run_eval_in_background():
-            close_old_connections()
-            try:
-                call_command("eval_ragas", **command_options)
-            except Exception as exc:
-                RagEvalRun.objects.filter(id=eval_run.id).update(
-                    status="failed",
-                    error_message=str(exc),
-                    finished_at=timezone.now(),
-                )
-            finally:
-                close_old_connections()
-
-        threading.Thread(target=run_eval_in_background, daemon=True).start()
+        from .tasks import run_eval_task
+        try:
+            result = run_eval_task.apply_async(args=[eval_run.id, command_options], queue="evaluations")
+            eval_run.celery_task_id = result.id
+            eval_run.save(update_fields=["celery_task_id"])
+        except Exception as exc:
+            eval_run.status = "failed"
+            eval_run.error_message = f"评测任务无法进入队列，请检查 Celery/Redis：{exc}"
+            eval_run.finished_at = timezone.now()
+            eval_run.save(update_fields=["status", "error_message", "finished_at"])
+            return Response({"detail": eval_run.error_message}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(RagEvalRunDetailSerializer(eval_run).data, status=status.HTTP_202_ACCEPTED)
+
+
+class DocumentParseBenchmarkCaseViewSet(viewsets.ModelViewSet):
+    serializer_class = DocumentParseBenchmarkCaseSerializer
+
+    def get_queryset(self):
+        queryset = DocumentParseBenchmarkCase.objects.filter(owner=self.request.user)
+        suite = self.request.query_params.get("suite")
+        if suite: queryset = queryset.filter(suite=suite)
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class DocumentParseEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = DocumentParseEvalRunSerializer
+
+    def get_queryset(self):
+        queryset = DocumentParseEvalRun.objects.filter(owner=self.request.user).prefetch_related("case_results__case")
+        suite = self.request.query_params.get("suite")
+        if suite: queryset = queryset.filter(suite=suite)
+        return queryset
+
+    @action(detail=False, methods=["post"], url_path="run")
+    def run(self, request):
+        suite = request.data.get("suite") or "benchmark"
+        allowed = {choice[0] for choice in RagBenchmarkCase.SUITE_CHOICES}
+        if suite not in allowed: return Response({"detail": "Invalid suite."}, status=status.HTTP_400_BAD_REQUEST)
+        count = DocumentParseBenchmarkCase.objects.filter(owner=request.user, suite=suite, enabled=True).count()
+        if not count: return Response({"detail": "该 suite 没有启用的解析评测 Case。"}, status=status.HTTP_409_CONFLICT)
+        run = DocumentParseEvalRun.objects.create(owner=request.user, suite=suite, case_count=count)
+        from .tasks import parse_eval_run_task
+        try:
+            result = parse_eval_run_task.apply_async(args=[run.id], queue="evaluations")
+            run.celery_task_id = result.id; run.save(update_fields=["celery_task_id"])
+        except Exception as exc:
+            run.status="failed"; run.error_message=str(exc); run.finished_at=timezone.now()
+            run.save(update_fields=["status","error_message","finished_at"])
+            return Response({"detail": "解析评测任务无法进入队列。"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(self.get_serializer(run).data, status=status.HTTP_202_ACCEPTED)
+
+
+class RagConfigVersionViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RagConfigVersionSerializer
+
+    def get_queryset(self):
+        queryset = RagConfigVersion.objects.filter(kb__owner=self.request.user)
+        kb = self.request.query_params.get("kb")
+        return queryset.filter(kb_id=kb) if kb else queryset
+
+    @action(detail=True, methods=["post"], url_path="request-publish")
+    def request_publish(self, request, pk=None):
+        version = self.get_object()
+        if version.validation_status != "release_passed":
+            return Response({"detail": "配置尚未通过 release gate。"}, status=status.HTTP_409_CONFLICT)
+        action_obj, _ = RagAgentAction.objects.get_or_create(
+            owner=request.user, action_uid=f"publish-config-{version.id}",
+            defaults={"kb": version.kb, "action_type": "publish_rag_config", "source": "config_release",
+                      "title": f"发布配置 v{version.version}", "description": "Release suite 已通过。确认后切换知识库活跃配置。",
+                      "confirm_label": "确认发布", "payload": {"config_version": version.id}, "status": "pending"},
+        )
+        return Response(RagAgentActionSerializer(action_obj).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="request-rollback")
+    def request_rollback(self, request, pk=None):
+        version = self.get_object()
+        if version.validation_status != "release_passed":
+            return Response({"detail": "只能回滚到通过 release gate 的版本。"}, status=status.HTTP_409_CONFLICT)
+        was_deployed = version.source == "initial" or RagConfigDeployment.objects.filter(kb=version.kb, target_version=version).exists()
+        if not was_deployed:
+            return Response({"detail": "只能回滚到历史上实际部署过的版本。"}, status=status.HTTP_409_CONFLICT)
+        action_obj, _ = RagAgentAction.objects.get_or_create(
+            owner=request.user, action_uid=f"rollback-config-{version.kb_id}-{version.id}",
+            defaults={"kb": version.kb, "action_type": "rollback_rag_config", "source": "config_history",
+                      "title": f"回滚到配置 v{version.version}", "description": "确认后原子切换配置并保留完整审计记录。",
+                      "confirm_label": "确认回滚", "payload": {"config_version": version.id, "reason": request.data.get("reason", "")}, "status": "pending"},
+        )
+        return Response(RagAgentActionSerializer(action_obj).data, status=status.HTTP_201_CREATED)
+
+
+class RagConfigDeploymentViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RagConfigDeploymentSerializer
+    def get_queryset(self):
+        queryset = RagConfigDeployment.objects.filter(kb__owner=self.request.user).select_related("previous_version","target_version")
+        kb = self.request.query_params.get("kb")
+        return queryset.filter(kb_id=kb) if kb else queryset

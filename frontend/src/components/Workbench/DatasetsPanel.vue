@@ -193,6 +193,70 @@
             </div>
           </article>
         </div>
+        <section class="parse-eval-maintenance">
+          <header class="form-section-head">
+            <div>
+              <h3>文档解析评测集</h3>
+              <p>维护页级结构、OCR 识别与解析质量的确定性验收样例。</p>
+            </div>
+            <span class="muted">TXT / Markdown / DOCX / PDF</span>
+          </header>
+
+          <el-form class="parse-case-form" label-position="top" @submit.prevent="$emit('create-parse-case')">
+            <el-form-item label="Case ID">
+              <el-input v-model="parseCaseForm.case_id" placeholder="例如 parse_markdown_001" />
+            </el-form-item>
+            <el-form-item label="标题">
+              <el-input v-model="parseCaseForm.title" placeholder="样例用途或文档类型" />
+            </el-form-item>
+            <el-form-item label="Suite">
+              <el-select v-model="parseCaseForm.suite">
+                <el-option v-for="suite in evalSuites" :key="suite.value" :label="suite.label" :value="suite.value" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item label="评测文档">
+              <el-upload
+                :auto-upload="false"
+                :limit="1"
+                accept=".txt,.md,.markdown,.docx,.pdf"
+                @change="$emit('select-parse-file', $event.raw)"
+              >
+                <el-button>选择文档</el-button>
+              </el-upload>
+            </el-form-item>
+            <el-form-item label="期望页数">
+              <el-input-number v-model="parseCaseForm.expected_page_count" :min="1" controls-position="right" />
+            </el-form-item>
+            <el-form-item class="parse-field-wide" label="期望标题">
+              <el-input v-model="parseCaseForm.expectedHeadingsText" type="textarea" :rows="3" placeholder="每行一个标题，按原文填写" />
+            </el-form-item>
+            <el-form-item class="parse-field-all" label="逐页术语 JSON">
+              <el-input
+                v-model="parseCaseForm.expectedTermsByPageText"
+                type="textarea"
+                :rows="4"
+                placeholder='例如 {"1":["Redis","Celery"],"2":["Milvus"]}'
+              />
+            </el-form-item>
+
+            <div class="parse-case-actions">
+              <el-button type="primary" native-type="submit" :loading="busy.parseCaseCreate">创建解析 Case</el-button>
+              <el-button :loading="busy.parseCaseRefresh" @click="$emit('refresh-parse-cases')">刷新列表</el-button>
+            </div>
+          </el-form>
+
+          <div v-if="!parseCases.length" class="empty-state parse-case-empty">暂无文档解析评测 Case。</div>
+          <div v-else class="parse-case-list">
+            <article v-for="item in parseCases" :key="item.id" class="benchmark-item">
+              <div class="trace-history-main">
+                <strong>{{ item.case_id }} · {{ item.title }}</strong>
+                <small>{{ suiteLabel(item.suite) }} · 期望 {{ item.expected_page_count || '-' }} 页</small>
+              </div>
+              <el-button type="danger" plain @click="$emit('delete-parse-case', item)">删除</el-button>
+            </article>
+          </div>
+        </section>
       </div>
     </el-collapse-item>
   </el-collapse>
@@ -211,6 +275,8 @@ defineProps({
   caseSources: { type: Array, default: () => [] },
   benchmarkForm: { type: Object, required: true },
   benchmarkCases: { type: Array, default: () => [] },
+  parseCaseForm: { type: Object, required: true },
+  parseCases: { type: Array, default: () => [] },
   busy: { type: Object, required: true },
 })
 
@@ -222,6 +288,7 @@ const emit = defineEmits([
   'create-case',
   'toggle-case',
   'delete-case',
+  'select-parse-file', 'create-parse-case', 'refresh-parse-cases', 'delete-parse-case',
 ])
 
 const suiteLabels = {

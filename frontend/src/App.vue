@@ -89,6 +89,8 @@
               :agent-actions="agentActions"
               :active-experiment-plan="activeExperimentPlan"
               :agent-thread-id="currentAgentThreadId"
+              :config-versions="configVersions"
+              :config-deployments="configDeployments"
               :compact-text="compactText"
               :format-date="formatDate"
               :has-diagnosis="hasDiagnosis"
@@ -104,6 +106,7 @@
               @confirm-action="confirmAgentAction"
               @refresh-experiment-plan="refreshExperimentPlan"
               @new-agent-thread="resetAgentThread"
+              @request-config-rollback="requestConfigRollback"
             />
 
             <CostsPanel
@@ -148,12 +151,18 @@
               :case-sources="caseSources"
               :benchmark-form="benchmarkForm"
               :benchmark-cases="benchmarkCases"
+              :parse-case-form="parseCaseForm"
+              :parse-cases="parseCases"
               :busy="busy"
               @refresh="loadBenchmarkCases"
               @import-defaults="importDefaultBenchmarkCases"
               @create-case="createBenchmarkCase"
               @toggle-case="toggleBenchmarkCase"
               @delete-case="deleteBenchmarkCase"
+              @select-parse-file="parseCaseForm.file = $event"
+              @create-parse-case="createParseCase"
+              @refresh-parse-cases="loadParseCases"
+              @delete-parse-case="deleteParseCase"
             />
 
             <EvaluationPanel
@@ -171,6 +180,8 @@
               :eval-run-comparison="evalRunComparison"
               :failure-analysis="failureAnalysis"
               :rag-options="ragOptions"
+              :parse-eval-runs="parseEvalRuns"
+              :selected-parse-eval-run="selectedParseEvalRun"
               :busy="busy"
               :format-date="formatDate"
               :metric-label="metricLabel"
@@ -190,6 +201,9 @@
               @set-baseline="setBaselineEvalRun"
               @compare-baseline="compareEvalRunWithBaseline"
               @scroll-to-case="scrollToEvalCase"
+              @run-parse-eval="runParseEval"
+              @load-parse-eval-runs="loadParseEvalRuns"
+              @open-parse-eval-run="openParseEvalRun"
             />
           </section>
 
@@ -290,6 +304,11 @@ const traceHistory = ref([])
 const selectedTraceIds = ref([])
 const traceSearch = ref('')
 const benchmarkCases = ref([])
+const parseCases = ref([])
+const parseEvalRuns = ref([])
+const selectedParseEvalRun = ref(null)
+const configVersions = ref([])
+const configDeployments = ref([])
 const selectedDatasetSuite = ref('')
 const activeWorkbenchTab = ref('debug')
 const activeCollapseSections = reactive({
@@ -319,6 +338,9 @@ const busy = reactive({
   datasetRefresh: false,
   datasetCreate: false,
   datasetAction: '',
+  parseCaseCreate: false,
+  parseCaseRefresh: false,
+  parseEvalRun: false,
   agent: false,
   agentAction: '',
   feedback: '',
@@ -366,6 +388,7 @@ const ragOptions = reactive({
   rrf_k: 60,
   rerank_top_n: 5,
   compression_strategy: 'structure_aware',
+  override_enabled: false,
 })
 const agentForm = reactive({
   message: '请执行端到端 RAG 修复工作流：收集证据、定位失败阶段、生成优化方案；如果需要创建回归样例或运行参数实验，请先生成待确认动作。',
@@ -373,6 +396,16 @@ const agentForm = reactive({
   eval_run_id: '',
   compare_eval_run_id: '',
   thread_id: '',
+})
+
+const parseCaseForm = reactive({
+  case_id: '',
+  title: '',
+  suite: 'benchmark',
+  file: null,
+  expected_page_count: 1,
+  expectedHeadingsText: '',
+  expectedTermsByPageText: '{}',
 })
 
 const benchmarkForm = reactive({
@@ -412,12 +445,12 @@ watch(activeWorkbenchTab, () => {
   actionError.value = ''
 })
 const queryRewriteStrategies = [
-  { value: 'rule', label: 'Rule Rewrite', description: '\u89c4\u5219\u6539\u5199\uff0c\u4fbf\u5b9c\u3001\u7a33\u5b9a\u3001\u53ef\u89e3\u91ca\u3002' },
-  { value: 'llm', label: 'LLM Rewrite', description: '\u8c03\u7528\u4fbf\u5b9c\u6a21\u578b\u505a\u8bed\u4e49\u6539\u5199\uff0c\u66f4\u7075\u6d3b\u4f46\u66f4\u6162\u3002' },
-  { value: 'none', label: 'No Rewrite', description: '\u4e0d\u6539\u5199\uff0c\u76f4\u63a5\u4f7f\u7528\u539f\u59cb\u95ee\u9898\u68c0\u7d22\u3002' },
+  { value: 'rule', label: 'Rule Rewrite', description: '规则改写，便宜、稳定、可解释。' },
+  { value: 'llm', label: 'LLM Rewrite', description: '调用便宜模型做语义改写，更灵活但更慢。' },
+  { value: 'none', label: 'No Rewrite', description: '不改写，直接使用原始问题检索。' },
 ]
 const compressionStrategies = [
-  { value: 'llm', label: 'LLM Compression', description: '\u8c03\u7528\u4fbf\u5b9c\u6a21\u578b\u505a\u8bed\u4e49\u538b\u7f29\uff0c\u66f4\u667a\u80fd\u4f46\u66f4\u6162\u4e14\u4f1a\u4ea7\u751f\u989d\u5916\u8c03\u7528\u6210\u672c\u3002' },
+  { value: 'llm', label: 'LLM Compression', description: '调用便宜模型做语义压缩，更智能但更慢且会产生额外调用成本。' },
   { value: 'structure_aware', label: 'Structure Aware', description: '保留命中句子，并保护标题、列表等结构化上下文。' },
   { value: 'sentence_filter', label: 'Sentence Filter', description: '只按问题关键词相关性保留句子，压缩更激进。' },
   { value: 'none', label: 'No Compression', description: '不压缩，直接把 Rerank 后的 chunk 作为上下文。' },
@@ -438,6 +471,70 @@ async function runAction(fn) {
     busy.reset = false
     busy.eval = false
   }
+}
+
+async function loadParseCases() {
+  busy.parseCaseRefresh = true
+  try { parseCases.value = await api.listParseCases() } finally { busy.parseCaseRefresh = false }
+}
+
+async function createParseCase() {
+  if (!parseCaseForm.file || !parseCaseForm.case_id || !parseCaseForm.title) {
+    actionError.value = '请填写 Case ID、标题并选择文档'
+    return
+  }
+  busy.parseCaseCreate = true
+  try {
+    await api.createParseCase({
+      case_id: parseCaseForm.case_id, title: parseCaseForm.title, suite: parseCaseForm.suite,
+      file: parseCaseForm.file, expected_page_count: parseCaseForm.expected_page_count,
+      expected_headings: parseCaseForm.expectedHeadingsText.split(/\n/).map((v) => v.trim()).filter(Boolean),
+      expected_terms_by_page: JSON.parse(parseCaseForm.expectedTermsByPageText || '{}'),
+      expected_ocr_pages: [], expected_block_types: [], expected_table_terms: [], thresholds: {}, tags: [], enabled: true,
+    })
+    parseCaseForm.case_id = ''; parseCaseForm.title = ''; parseCaseForm.file = null
+    await loadParseCases(); notice.value = '解析评测 Case 已创建'
+  } catch (err) { actionError.value = getErrorMessage(err) } finally { busy.parseCaseCreate = false }
+}
+
+async function deleteParseCase(item) {
+  await api.deleteParseCase(item.id); await loadParseCases()
+}
+
+async function loadParseEvalRuns() {
+  parseEvalRuns.value = await api.listParseEvalRuns()
+}
+
+async function runParseEval(suite) {
+  busy.parseEvalRun = true
+  try {
+    const run = await api.runParseEval(suite)
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      await sleep(1000)
+      const current = await api.getParseEvalRun(run.id)
+      if (['completed', 'failed'].includes(current.status)) { selectedParseEvalRun.value = current; break }
+    }
+    await loadParseEvalRuns()
+  } catch (err) { actionError.value = getErrorMessage(err) } finally { busy.parseEvalRun = false }
+}
+
+async function openParseEvalRun(run) {
+  selectedParseEvalRun.value = await api.getParseEvalRun(run.id)
+}
+
+async function requestConfigRollback(version) {
+  try {
+    await api.requestRollbackConfig(version.id, '从 Agent 配置历史发起回滚')
+    await loadAgentActions()
+    notice.value = `配置 v${version.version} 的回滚确认卡已创建`
+  } catch (err) { actionError.value = getErrorMessage(err) }
+}
+
+async function loadConfigHistory() {
+  if (!selectedKb.value) { configVersions.value = []; configDeployments.value = []; return }
+  [configVersions.value, configDeployments.value] = await Promise.all([
+    api.listConfigVersions(selectedKb.value.id), api.listConfigDeployments(selectedKb.value.id),
+  ])
 }
 
 async function loadBenchmarkCases() {
@@ -492,7 +589,7 @@ const {
   resetAgentThread,
   runAgent,
   loadAgentActions,
-  confirmAgentAction,
+  confirmAgentAction: confirmAgentActionBase,
   refreshExperimentPlan,
   hasDiagnosis,
   diagnosisSeverityText,
@@ -515,6 +612,12 @@ const {
   selectedDatasetSuite,
 })
 
+async function confirmAgentAction(action) {
+  await confirmAgentActionBase(action)
+  await loadKbs()
+  await loadConfigHistory()
+}
+
 async function loadModelUsage() {
   if (!selectedKb.value) {
     modelUsage.value = null
@@ -530,6 +633,11 @@ async function loadTraceHistory() {
     selectedTraceIds.value = []
     resetEvalState()
     benchmarkCases.value = []
+    parseCases.value = []
+    parseEvalRuns.value = []
+    selectedParseEvalRun.value = null
+    configVersions.value = []
+    configDeployments.value = []
     modelUsage.value = null
     return
   }
@@ -974,6 +1082,9 @@ async function bootstrap() {
   await loadTraceHistory()
   await loadEvalRuns()
   await loadBenchmarkCases()
+  await loadParseCases()
+  await loadParseEvalRuns()
+  await loadConfigHistory()
   await loadAgentActions()
   await loadChatSessions({ restore: true })
 }
@@ -1005,6 +1116,9 @@ function selectKb(kb) {
   loadTraceHistory()
   loadEvalRuns()
   loadBenchmarkCases()
+  loadParseCases()
+  loadParseEvalRuns()
+  loadConfigHistory()
   loadModelUsage()
   loadAgentActions()
   loadChatSessions({ restore: true })
@@ -1131,9 +1245,19 @@ async function indexDoc() {
     busy.index = true
     const payload = { ...chunkForm, parse_run_id: selectedDocument.value.latest_parse?.id }
     const result = await api.indexDocument(documentId, payload)
-    await refreshSelectedDocument(documentId)
-    notice.value = `索引完成：${result.chunk_count} 个切片已入库`
-    await preview()
+    notice.value = `索引任务 #${result.id} 已进入队列`
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      await sleep(1000)
+      const state = await api.getIndexStatus(documentId)
+      if (state.run?.status === 'completed') {
+        await refreshSelectedDocument(documentId)
+        notice.value = `索引完成：${state.run.chunk_count} 个切片已入库`
+        await preview()
+        return
+      }
+      if (state.run?.status === 'failed') throw new Error(state.run.error_message || '索引失败')
+    }
+    throw new Error('索引任务仍在执行，请稍后刷新状态')
   })
   busy.index = false
 }

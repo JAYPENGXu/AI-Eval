@@ -3162,3 +3162,139 @@ header {
     grid-template-columns: 1fr;
   }
 }
+
+.parse-eval-maintenance {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.parse-eval-maintenance > .form-section-head {
+  padding-bottom: 12px;
+  border-bottom: 1px solid #edf1f7;
+}
+
+.parse-eval-maintenance .form-section-head > div {
+  min-width: 0;
+}
+
+.parse-eval-maintenance .form-section-head h3 {
+  margin: 0;
+  color: #1f2937;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.parse-eval-maintenance .form-section-head p {
+  margin: 4px 0 0;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.parse-case-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px 16px;
+  min-width: 0;
+}
+
+.parse-case-form .el-form-item {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.parse-case-form .el-select,
+.parse-case-form .el-input,
+.parse-case-form .el-textarea {
+  width: 100%;
+}
+
+.parse-case-form .el-input-number {
+  width: 100%;
+}
+
+.parse-case-form .el-upload {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+}
+
+.parse-case-form .el-upload-list {
+  margin: 6px 0 0;
+}
+
+.parse-field-wide {
+  grid-column: span 2;
+}
+
+.parse-field-all,
+.parse-case-actions {
+  grid-column: 1 / -1;
+}
+
+.parse-case-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding-top: 2px;
+}
+
+.parse-case-actions .el-button {
+  min-width: 120px;
+  margin-left: 0;
+}
+
+.parse-case-empty {
+  margin-top: 0;
+}
+
+.parse-case-list {
+  display: grid;
+  gap: 10px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 1200px) {
+  .parse-case-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .parse-field-wide {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .parse-eval-maintenance {
+    padding: 14px;
+  }
+
+  .parse-eval-maintenance > .form-section-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .parse-case-form {
+    grid-template-columns: 1fr;
+  }
+
+  .parse-field-wide,
+  .parse-field-all,
+  .parse-case-actions {
+    grid-column: 1;
+  }
+
+  .parse-case-actions {
+    flex-wrap: wrap;
+  }
+}

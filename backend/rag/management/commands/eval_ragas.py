@@ -1015,6 +1015,10 @@ class Command(BaseCommand):
                     diagnostics=result.get("diagnostics", {}),
                     deterministic_results=result.get("deterministic_results", {}),
                     judge_results=result.get("judge_results", {}),
+                    execution_metrics={
+                        "latency_ms": result.get("latency_ms", 0),
+                        "estimated_total_tokens": result.get("estimated_total_tokens", 0),
+                    },
                 )
                 for result in results
             ]
@@ -1027,5 +1031,9 @@ class Command(BaseCommand):
             "judge": summary.get("judge", {}),
         }
         eval_run.case_count = len(results)
+        eval_run.execution_metrics = {
+            "avg_latency_ms": round(sum(float(item.get("latency_ms") or 0) for item in results) / len(results), 2) if results else 0,
+            "total_estimated_tokens": sum(int(item.get("estimated_total_tokens") or 0) for item in results),
+        }
         eval_run.finished_at = timezone.now()
-        eval_run.save(update_fields=["status", "mean_scores", "retrieval_metrics", "case_count", "finished_at"])
+        eval_run.save(update_fields=["status", "mean_scores", "retrieval_metrics", "case_count", "execution_metrics", "finished_at"])

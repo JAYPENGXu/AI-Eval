@@ -41,10 +41,10 @@ Agent 修复闭环展示系统如何围绕失败 Trace 或 Baseline Eval Run 收
 - 后端：Django、Django REST Framework、SimpleJWT、SQLite、pytest。
 - 前端：Vue 3、Vite 7、Element Plus、Pinia、TypeScript。
 - 文档解析：PyMuPDF、python-docx、charset-normalizer、PaddleOCR Job API、统一 Document IR。
-- 异步任务：Celery + Redis 负责持久化文档解析和 OCR 调度。
+- 异步任务：Celery + Redis 统一负责文档解析/索引、会话摘要、RAG 评测、解析评测和 Agent 参数实验。
 - 检索：Milvus Lite 向量索引、SQLite Chunk 元数据、BM25。
 - RAG：Query Router、Session Summary Memory、Query Rewrite、Hybrid Search、Rerank、Context Compression、SSE Streaming。
-- 评测：RAGAS、轻量后台线程、Eval Run 对比、Failure Analysis。
+- 评测：RAGAS、Celery Eval Run、Run 对比、Failure Analysis。
 - Agent：LangGraph、SQLite checkpointer、LangGraph 原生 interrupt/resume、HITL Action Card、Agent 审计记录。
 - 模型：通过 `backend/.env` 中的 OpenAI-compatible 配置调用聊天、Embedding、Rerank、Rewrite、Compression。
 
@@ -53,7 +53,7 @@ Agent 修复闭环展示系统如何围绕失败 Trace 或 Baseline Eval Run 收
 这个仓库定位是 RAGOps 学习与工程化演示项目，强调 RAG 链路可观测、可评测、可回归和 HITL 修复闭环；默认配置优先服务本地开发与演示。若要进入生产环境，建议按以下方向演进：
 
 - **配置与密钥安全**：本地开发通过 `backend/.env` 读取模型和向量库配置；生产环境应关闭 `DEBUG`、使用强 `SECRET_KEY`、限制 `ALLOWED_HOSTS/CORS_ALLOWED_ORIGINS`，并通过密钥管理系统注入 API Key，避免写入日志或提交到仓库。
-- **任务队列与可靠性**：文档解析和 PaddleOCR 已使用 Celery + Redis，支持持久任务、超时、重试、进度与 Worker 崩溃后重投；Session Summary、Eval Run、Experiment Plan 仍采用轻量后台执行，生产环境应逐步迁移到同一任务队列。
+- **任务队列与可靠性**：解析、索引、摘要、RAG/解析评测和 Agent 实验已统一进入 Celery；任务保存 queued/running/completed/failed、task ID、心跳、错误和重试信息，Redis/Worker 不可用时 API 明确失败。
 - **数据与向量存储扩展**：当前默认 SQLite + Milvus Lite 便于本地复现；生产环境可迁移到 PostgreSQL + Milvus Server/Zilliz Cloud，并增加索引重建、向量库与业务库一致性校验、备份恢复流程。
 - **上传与访问控制**：当前已实现大小、类型、文件签名、PDF 页数/加密和 DOCX Zip Bomb 校验，并保持 owner 级 API 过滤；生产环境仍应增加恶意文件扫描、对象存储隔离、配额和数据出域审计。
 - **LLM-as-Judge 风险控制**：Judge 输出应经过 JSON Schema 校验、分数范围 clamp 和 parse failure 记录；Prompt 中应明确忽略被评估答案或引用内容里的指令，避免 prompt injection 影响评分。
@@ -111,7 +111,7 @@ AIAssistant/
 - 向量索引：Chunk 写入 SQLite，Embedding 写入 Milvus Lite。
 - Query Router：识别 `internal_knowledge` 和 `web_required`，需要联网/实时信息的问题不会硬查内部知识库。
 - 多轮对话：基于当前 ChatSession 最近几轮消息做 Conversational Query Rewrite，解决“他/这个/刚才那个”等指代问题。
-- 会话摘要记忆：长对话达到阈值后后台线程生成 Session Summary，后续问题改写会结合摘要和最近几轮消息。
+- 会话摘要记忆：长对话达到阈值后由 Celery 生成 Session Summary，后续问题改写会结合摘要和最近几轮消息。
 - 混合检索：Vector Search + BM25 Search，通过 RRF 做 Hybrid Fusion。
 - Rerank：对 Hybrid 候选重新排序。
 - Context Compression：支持结构感知压缩、句子过滤、LLM 压缩等策略。
@@ -185,7 +185,7 @@ RAG 长期知识记忆 = Document / Chunk / Milvus 向量索引
 Agent 工作流记忆 = LangGraph SQLite checkpointer
 ```
 
-`ChatSessionSummary` 由后台线程异步生成，不阻塞 SSE 回答。触发条件默认是：
+`ChatSessionSummary` 由 Celery 异步生成，不阻塞 SSE 回答。触发条件默认是：
 
 ```text
 当前会话消息数 - summary_message_count >= SESSION_SUMMARY_TRIGGER_MESSAGES
@@ -317,7 +317,7 @@ python manage.py migrate
 python manage.py runserver 127.0.0.1:8010
 
 # 另开终端，确保 Redis 已启动
-celery -A assistant_backend worker --loglevel=INFO --concurrency=1
+celery -A assistant_backend worker --loglevel=INFO --concurrency=1 --queues=documents,evaluations,summaries,orchestration
 ```
 
 前端：
@@ -360,7 +360,7 @@ http://127.0.0.1:8080
 
 ```bash
 docker compose logs -f backend
-docker compose logs -f parser-worker
+docker compose logs -f celery-worker
 docker compose logs -f frontend
 ```
 
@@ -485,3 +485,17 @@ python manage.py eval_ragas --suite regression
 3. Agent 修复闭环：Agent 诊断问题、生成建议，写操作交给 HITL 确认。
 
 这使它更适合作为简历项目或学习项目里的“RAG 工程化 + RAGOps + Agent 工作流”案例，而不是普通聊天机器人。
+
+
+## 运行健康、索引版本与配置发布
+
+- `GET /api/health/live/`：Django 进程存活。
+- `GET /api/health/ready/`：检查数据库、Redis、Celery Worker、media 和 Milvus，关键依赖异常返回 `503`。
+- `GET /api/system-health/`：登录后查看依赖延迟、错误和 Provider 配置状态。
+- 后端命令 `python manage.py check_runtime` 执行同一套 readiness 检查，不调用付费模型或 PaddleOCR。
+
+每次索引保存由文件、Parse Run、Parser/Chunker、Embedding 维度、Milvus Collection 和索引 Schema 组成的 manifest/signature。普通过期继续有限使用并在 Trace 中警告；Embedding 维度冲突会阻断问答。索引重建失败不会删除旧 Chunk。
+
+文档解析评测集支持页数、OCR 页、标题、逐页术语、Block/Table 和质量阈值，Run 由 Celery 执行并展示逐 Case 明细。
+
+每个知识库拥有不可变 `RagConfigVersion`。问答默认使用活跃版本，只有显式开启“临时参数覆盖”才使用调试参数。Agent Winner 通过增益、失败数、Deterministic/Judge 和性能门槛后自动执行 release suite；通过后生成第二张发布 HITL 卡。发布和回滚写入 `RagConfigDeployment`。

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import threading
 from collections import Counter
 from dataclasses import dataclass
 
-from django.core.management import call_command
-from django.db import close_old_connections
 from django.utils import timezone
 
 from .eval_runs import reconcile_stale_eval_run
+from .models import KnowledgeBase, RagAgentAction, RagBenchmarkCase, RagConfigVersion, RagEvalRun, RagExperimentPlan, RagExperimentVariant
 
 DEFAULT_METRICS = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
 
@@ -188,7 +186,7 @@ def start_experiment_plan(*, user, plan_id: int) -> RagExperimentPlan:
         eval_run = RagEvalRun.objects.create(
             kb=plan.kb,
             baseline_run=plan.baseline_run,
-            status="running",
+            status="queued",
             metrics=DEFAULT_METRICS,
             settings={
                 "trigger": "agent_experiment_plan",
@@ -200,22 +198,20 @@ def start_experiment_plan(*, user, plan_id: int) -> RagExperimentPlan:
         )
         variant.eval_run = eval_run
         variant.save(update_fields=["eval_run", "updated_at"])
-        command_options = {"kb_id": plan.kb_id, "suite": suite, "run_id": eval_run.id, **(variant.rag_options or {})}
-        start_eval_thread(eval_run.id, command_options)
-    return plan
-
-
-def start_eval_thread(run_id: int, command_options: dict):
-    def runner():
-        close_old_connections()
+        command_options = {"kb_id": plan.kb_id, "suite": suite, **(variant.rag_options or {})}
+        from .tasks import run_eval_task
         try:
-            call_command("eval_ragas", **command_options)
+            result = run_eval_task.apply_async(args=[eval_run.id, command_options], queue="evaluations")
+            eval_run.celery_task_id = result.id
+            eval_run.save(update_fields=["celery_task_id"])
         except Exception as exc:
-            RagEvalRun.objects.filter(id=run_id).update(status="failed", error_message=str(exc), finished_at=timezone.now())
-        finally:
-            close_old_connections()
-
-    threading.Thread(target=runner, daemon=True).start()
+            eval_run.status = "failed"
+            eval_run.error_message = f"实验评测任务入队失败：{exc}"
+            eval_run.finished_at = timezone.now()
+            eval_run.save(update_fields=["status", "error_message", "finished_at"])
+    from .tasks import finalize_experiment_plan_task
+    finalize_experiment_plan_task.apply_async(args=[plan.id], countdown=1, queue="orchestration")
+    return plan
 
 
 def refresh_experiment_plan(plan: RagExperimentPlan) -> RagExperimentPlan:
@@ -229,6 +225,10 @@ def refresh_experiment_plan(plan: RagExperimentPlan) -> RagExperimentPlan:
         return plan
     if plan.status not in {"running", "completed"}:
         return plan
+    candidate = RagConfigVersion.objects.filter(experiment_plan=plan).order_by("-version").first()
+    if candidate:
+        finalize_release_candidate(candidate)
+        return plan
     variants = list(plan.variants.all())
     if not variants or any(not variant.eval_run_id for variant in variants):
         return plan
@@ -236,7 +236,7 @@ def refresh_experiment_plan(plan: RagExperimentPlan) -> RagExperimentPlan:
         if variant.eval_run:
             reconcile_stale_eval_run(variant.eval_run)
     variants = list(plan.variants.select_related("eval_run").all())
-    if any(variant.eval_run and variant.eval_run.status == "running" for variant in variants):
+    if any(variant.eval_run and variant.eval_run.status in {"queued", "running"} for variant in variants):
         return plan
 
     for variant in variants:
@@ -258,6 +258,8 @@ def refresh_experiment_plan(plan: RagExperimentPlan) -> RagExperimentPlan:
     plan.completed_at = timezone.now()
     plan.save(update_fields=["status", "winner_variant", "recommendation", "completed_at", "updated_at"])
     finalize_experiment_plan_action(plan)
+    if plan.status == "completed" and winner:
+        create_release_candidate(plan, winner)
     return plan
 
 
@@ -324,14 +326,97 @@ def failed_count(run: RagEvalRun) -> int:
 
 
 def choose_winner(variants: list[RagExperimentVariant]) -> RagExperimentVariant | None:
-    completed = [item for item in variants if item.eval_run and item.eval_run.status == "completed"]
-    if not completed:
+    eligible = []
+    for item in variants:
+        run = item.eval_run
+        summary = item.result_summary or {}
+        if not run or run.status != "completed" or summary.get("score_delta", 0) < 0.01 or summary.get("failed_delta", 1) > 0:
+            continue
+        results = list(run.case_results.all())
+        if not results or any(
+            result.error_message
+            or (result.deterministic_results or {}).get("passed") is False
+            or (result.judge_results or {}).get("passed") is False
+            for result in results
+        ):
+            continue
+        baseline_latency = float((item.plan.baseline_run.execution_metrics or {}).get("avg_latency_ms") or 0)
+        latency = float((run.execution_metrics or {}).get("avg_latency_ms") or 0)
+        if baseline_latency and latency > baseline_latency * 1.2:
+            continue
+        eligible.append(item)
+    if not eligible:
         return None
-    return sorted(
-        completed,
-        key=lambda item: (
-            item.result_summary.get("score_delta", 0),
-            -item.result_summary.get("failed_count", 9999),
-        ),
-        reverse=True,
-    )[0]
+    return sorted(eligible, key=lambda item: (item.result_summary.get("score_delta", 0), -item.result_summary.get("failed_count", 9999)), reverse=True)[0]
+
+
+def create_release_candidate(plan, winner):
+    from .config_versions import create_config_version, ensure_initial_config
+    parent = ensure_initial_config(plan.kb, plan.owner)
+    candidate = create_config_version(
+        kb=plan.kb, payload=winner.rag_options, user=plan.owner, source="experiment", parent=parent,
+        experiment_plan=plan, winner_variant=winner,
+    )
+    release_count = RagBenchmarkCase.objects.filter(kb=plan.kb, suite="release", enabled=True).count()
+    if not release_count:
+        candidate.validation_status = "release_failed"
+        candidate.save(update_fields=["validation_status"])
+        plan.recommendation = {**(plan.recommendation or {}), "release_gate": "failed", "release_reason": "没有启用的 release Case。", "candidate_version": candidate.version}
+        plan.save(update_fields=["recommendation", "updated_at"])
+        return candidate
+    run = RagEvalRun.objects.create(
+        kb=plan.kb, baseline_run=plan.baseline_run, status="queued", metrics=DEFAULT_METRICS,
+        settings={"trigger": "release_gate", "experiment_plan": plan.id, "config_version": candidate.id, "requested_options": {"kb_id": plan.kb_id, "suite": "release", **candidate.payload}},
+    )
+    candidate.release_eval_run = run; candidate.validation_status = "release_running"
+    candidate.save(update_fields=["release_eval_run", "validation_status"])
+    from .tasks import run_eval_task
+    try:
+        result = run_eval_task.apply_async(args=[run.id, {"kb_id": plan.kb_id, "suite": "release", **candidate.payload}], queue="evaluations")
+        run.celery_task_id = result.id
+        run.save(update_fields=["celery_task_id"])
+    except Exception as exc:
+        run.status = "failed"; run.error_message = f"Release 评测任务入队失败：{exc}"; run.finished_at = timezone.now()
+        run.save(update_fields=["status", "error_message", "finished_at"])
+        candidate.validation_status = "release_failed"
+        candidate.save(update_fields=["validation_status"])
+        plan.recommendation = {**(plan.recommendation or {}), "release_gate": "failed", "release_reason": run.error_message, "candidate_version": candidate.version}
+        plan.save(update_fields=["recommendation", "updated_at"])
+        return candidate
+    plan.recommendation = {**(plan.recommendation or {}), "release_gate": "running", "candidate_version": candidate.version, "release_eval_run": run.id}
+    plan.save(update_fields=["recommendation", "updated_at"])
+    return candidate
+
+
+def finalize_release_candidate(candidate):
+    run = candidate.release_eval_run
+    if not run or run.status in {"queued", "running"}:
+        return
+    results = list(run.case_results.all())
+    passed = run.status == "completed" and run.case_count > 0 and len(results) > 0 and all(
+        not item.error_message
+        and (item.deterministic_results or {}).get("passed") is not False
+        and (item.judge_results or {}).get("passed") is not False
+        for item in results
+    )
+    regression_reason = ""
+    active = candidate.kb.active_config_version
+    previous_run = active.release_eval_run if active and active.release_eval_run_id else None
+    if passed and previous_run and previous_run.status == "completed":
+        previous_score = average_score(previous_run.mean_scores or {})
+        current_score = average_score(run.mean_scores or {})
+        if current_score < previous_score - 0.01 or failed_count(run) > failed_count(previous_run):
+            passed = False
+            regression_reason = "Release 相比当前线上版本出现显著评分或失败数回归。"
+    candidate.validation_status = "release_passed" if passed else "release_failed"
+    candidate.save(update_fields=["validation_status"])
+    plan = candidate.experiment_plan
+    if plan:
+        plan.recommendation = {**(plan.recommendation or {}), "release_gate": "passed" if passed else "failed", "release_reason": regression_reason, "candidate_version": candidate.version, "release_eval_run": run.id}
+        plan.save(update_fields=["recommendation", "updated_at"])
+    if not passed:
+        return
+    RagAgentAction.objects.get_or_create(
+        owner=candidate.created_by, action_uid=f"publish-config-{candidate.id}",
+        defaults={"kb": candidate.kb, "eval_run": run, "action_type": "publish_rag_config", "source": "config_release", "title": f"发布实验配置 v{candidate.version}", "description": "参数实验 Winner 已通过 release suite。确认后发布为知识库活跃配置。", "confirm_label": "确认发布", "payload": {"config_version": candidate.id}, "status": "pending"},
+    )

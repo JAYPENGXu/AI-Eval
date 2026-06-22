@@ -8,7 +8,7 @@ from rag.case_factory import (
     create_regression_case_from_user_feedback,
 )
 from rag.experiments import start_experiment_plan
-from rag.models import RagAgentAction
+from rag.models import RagAgentAction, RagConfigVersion
 
 
 def execute_agent_action(*, user, action: RagAgentAction) -> dict:
@@ -34,6 +34,18 @@ def execute_agent_action(*, user, action: RagAgentAction) -> dict:
             "variant_count": plan.variants.count(),
         }
         action.save(update_fields=["status", "result", "updated_at"])
+        return action.result
+
+    if action.action_type in {"publish_rag_config", "rollback_rag_config"}:
+        from rag.config_versions import deploy_config
+        target = RagConfigVersion.objects.filter(id=action.payload.get("config_version"), kb=action.kb, kb__owner=user).first()
+        if not target:
+            raise ValueError("Config version not found.")
+        operation = "publish" if action.action_type == "publish_rag_config" else "rollback"
+        deployment = deploy_config(kb=action.kb, target=target, user=user, action=action, operation=operation, reason=action.payload.get("reason", ""))
+        action.status = "completed"; action.completed_at = timezone.now()
+        action.result = {"deployment_id": deployment.id if deployment else None, "config_version": target.version, "operation": operation}
+        action.save(update_fields=["status", "completed_at", "result", "updated_at"])
         return action.result
 
     if action.action_type != "create_regression_case":

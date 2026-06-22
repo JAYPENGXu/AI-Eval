@@ -286,12 +286,35 @@
             </el-collapse>
           </article>
         </section>
+        <section class="eval-compare parse-eval-runs">
+          <div class="trace-title"><h3>文档解析评测</h3><span>独立于 RAG 回答评测</span></div>
+          <div class="trace-history-toolbar">
+            <el-select v-model="parseEvalSuite"><el-option v-for="suite in evalSuites" :key="suite.value" :label="suite.label" :value="suite.value" /></el-select>
+            <el-button type="primary" :loading="busy.parseEvalRun" @click="$emit('run-parse-eval', parseEvalSuite)">运行解析评测</el-button>
+            <el-button @click="$emit('load-parse-eval-runs')">刷新</el-button>
+          </div>
+          <div v-if="!parseEvalRuns.length" class="empty-state">暂无解析评测 Run。</div>
+          <article v-for="run in parseEvalRuns" :key="run.id" class="eval-run-item">
+            <div class="trace-history-main"><strong>#{{ run.id }} · {{ run.status }} · {{ run.passed_count }}/{{ run.case_count }}</strong><small>通过率 {{ Math.round((run.summary?.pass_rate || 0) * 100) }}% · P95 {{ run.summary?.p95_duration_ms || 0 }}ms</small></div>
+            <el-button @click="$emit('open-parse-eval-run', run)">查看明细</el-button>
+          </article>
+          <div v-if="selectedParseEvalRun?.case_results?.length" class="eval-case-list">
+            <article v-for="item in selectedParseEvalRun.case_results" :key="item.id" class="eval-case-card">
+              <strong>{{ item.passed ? '通过' : '失败' }} · {{ item.case_id }} · {{ item.title }}</strong>
+              <small>{{ item.duration_ms }}ms</small><pre>{{ JSON.stringify(item.checks, null, 2) }}</pre>
+              <p v-if="item.error_message" class="error-text">{{ item.error_message }}</p>
+            </article>
+          </div>
+        </section>
       </div>
     </el-collapse-item>
   </el-collapse>
 </template>
 
 <script setup>
+import { ref } from 'vue'
+const parseEvalSuite = ref('benchmark')
+
 defineProps({
   active: { type: Boolean, default: false },
   collapseValue: { type: Array, default: () => ['evaluation'] },
@@ -307,6 +330,8 @@ defineProps({
   evalRunComparison: { type: Object, default: null },
   failureAnalysis: { type: Object, default: () => ({ totalFailed: 0, groups: [] }) },
   ragOptions: { type: Object, default: () => ({}) },
+  parseEvalRuns: { type: Array, default: () => [] },
+  selectedParseEvalRun: { type: Object, default: null },
   busy: { type: Object, required: true },
   formatDate: { type: Function, required: true },
   metricLabel: { type: Function, required: true },
@@ -399,5 +424,6 @@ defineEmits([
   'set-baseline',
   'compare-baseline',
   'scroll-to-case',
+  'run-parse-eval', 'load-parse-eval-runs', 'open-parse-eval-run',
 ])
 </script>

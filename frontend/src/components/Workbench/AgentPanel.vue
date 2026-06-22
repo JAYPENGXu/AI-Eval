@@ -287,6 +287,13 @@
             </el-collapse>
           </section>
         </template>
+        <section class="agent-section config-release-history">
+          <div class="trace-title"><h3>配置发布与回滚</h3><span>知识库级不可变版本</span></div>
+          <div v-if="selectedKb?.active_config" class="baseline-strip"><strong>当前活跃 v{{ selectedKb.active_config.version }}</strong><small>{{ selectedKb.active_config.signature?.slice(0, 12) }}</small></div>
+          <div v-if="!configVersions.length" class="empty-state">暂无配置版本。</div>
+          <article v-for="version in configVersions" :key="version.id" class="agent-action-card"><div><strong>v{{ version.version }} · {{ version.validation_status }}</strong><small>{{ version.source }} · {{ version.signature?.slice(0, 12) }}</small></div><el-button v-if="version.validation_status === 'release_passed' && selectedKb?.active_config_version !== version.id" plain @click="$emit('request-config-rollback', version)">申请回滚</el-button></article>
+          <small v-if="configDeployments.length">最近部署：{{ configDeployments[0].operation }} → v{{ configDeployments[0].target_version_number }}</small>
+        </section>
       </div>
     </el-collapse-item>
   </el-collapse>
@@ -306,6 +313,8 @@ const props = defineProps({
   agentActions: { type: Array, default: () => [] },
   activeExperimentPlan: { type: Object, default: null },
   agentThreadId: { type: String, default: '' },
+  configVersions: { type: Array, default: () => [] },
+  configDeployments: { type: Array, default: () => [] },
   selectedAgentTask: { type: String, default: '' },
   compactText: { type: Function, required: true },
   formatDate: { type: Function, required: true },
@@ -410,5 +419,5 @@ function signedNumber(value) {
   return `${number >= 0 ? '+' : ''}${number}`
 }
 
-defineEmits(['quick-task', 'run-agent', 'confirm-action', 'refresh-experiment-plan', 'new-agent-thread', 'update:collapse-value'])
+defineEmits(['quick-task', 'run-agent', 'confirm-action', 'refresh-experiment-plan', 'new-agent-thread', 'update:collapse-value', 'request-config-rollback'])
 </script>

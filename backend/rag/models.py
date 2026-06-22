@@ -56,6 +56,9 @@ class KnowledgeBase(models.Model):
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True, default="")
+    active_config_version = models.ForeignKey(
+        "RagConfigVersion", null=True, blank=True, on_delete=models.SET_NULL, related_name="active_for_knowledge_bases"
+    )
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -86,6 +89,9 @@ class Document(models.Model):
     chunk_method = models.CharField(max_length=50, default="sentence")
     chunk_options = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True, default="")
+    index_signature = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    index_manifest = models.JSONField(default=dict, blank=True)
+    indexed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -116,6 +122,34 @@ class DocumentParseRun(models.Model):
     error_code = models.CharField(max_length=80, blank=True, default="")
     error_message = models.TextField(blank=True, default="")
     started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+
+class DocumentIndexRun(models.Model):
+    STATUS_CHOICES = [
+        ("queued", "Queued"), ("running", "Running"), ("completed", "Completed"),
+        ("failed", "Failed"), ("superseded", "Superseded"),
+    ]
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="index_runs")
+    parse_run = models.ForeignKey(DocumentParseRun, on_delete=models.PROTECT, related_name="index_runs")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    celery_task_id = models.CharField(max_length=100, blank=True, default="")
+    chunk_method = models.CharField(max_length=50, default="sentence")
+    chunk_options = models.JSONField(default=dict, blank=True)
+    target_signature = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    target_manifest = models.JSONField(default=dict, blank=True)
+    progress_current = models.PositiveIntegerField(default=0)
+    progress_total = models.PositiveIntegerField(default=0)
+    chunk_count = models.PositiveIntegerField(default=0)
+    retry_count = models.PositiveIntegerField(default=0)
+    error_message = models.TextField(blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -186,6 +220,7 @@ class ChatMessage(models.Model):
 class ChatSessionSummary(models.Model):
     STATUS_CHOICES = [
         ("idle", "Idle"),
+        ("queued", "Queued"),
         ("running", "Running"),
         ("failed", "Failed"),
     ]
@@ -204,6 +239,8 @@ class ChatSessionSummary(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="idle")
     error_message = models.TextField(blank=True, default="")
     last_started_at = models.DateTimeField(null=True, blank=True)
+    celery_task_id = models.CharField(max_length=100, blank=True, default="")
+    retry_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -340,6 +377,7 @@ class RagBenchmarkCase(models.Model):
 
 class RagEvalRun(models.Model):
     STATUS_CHOICES = [
+        ("queued", "Queued"),
         ("running", "Running"),
         ("completed", "Completed"),
         ("failed", "Failed"),
@@ -356,6 +394,10 @@ class RagEvalRun(models.Model):
     case_count = models.PositiveIntegerField(default=0)
     cases_path = models.CharField(max_length=500, blank=True, default="")
     error_message = models.TextField(blank=True, default="")
+    celery_task_id = models.CharField(max_length=100, blank=True, default="")
+    retry_count = models.PositiveIntegerField(default=0)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    execution_metrics = models.JSONField(default=dict, blank=True)
     started_at = models.DateTimeField(default=timezone.now)
     finished_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
@@ -393,6 +435,7 @@ class RagExperimentPlan(models.Model):
     failure_summary = models.JSONField(default=dict, blank=True)
     recommendation = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True, default="")
+    celery_task_id = models.CharField(max_length=100, blank=True, default="")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     started_at = models.DateTimeField(null=True, blank=True)
@@ -444,6 +487,7 @@ class RagEvalCaseResult(models.Model):
     diagnostics = models.JSONField(default=dict, blank=True)
     deterministic_results = models.JSONField(default=dict, blank=True)
     judge_results = models.JSONField(default=dict, blank=True)
+    execution_metrics = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(default=timezone.now)
 
@@ -461,6 +505,8 @@ class RagAgentAction(models.Model):
     ACTION_TYPE_CHOICES = [
         ("create_regression_case", "Create Regression Case"),
         ("run_experiment_plan", "Run Experiment Plan"),
+        ("publish_rag_config", "Publish RAG Config"),
+        ("rollback_rag_config", "Rollback RAG Config"),
     ]
 
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="rag_agent_actions")
@@ -499,6 +545,101 @@ class RagAgentAction(models.Model):
 
     def __str__(self):
         return f"{self.action_type}:{self.action_uid}"
+
+
+class RagConfigVersion(models.Model):
+    SOURCE_CHOICES = [("initial", "Initial"), ("manual", "Manual"), ("experiment", "Experiment"), ("rollback", "Rollback")]
+    VALIDATION_CHOICES = [
+        ("candidate", "Candidate"), ("release_running", "Release Running"),
+        ("release_passed", "Release Passed"), ("release_failed", "Release Failed"),
+    ]
+    kb = models.ForeignKey(KnowledgeBase, on_delete=models.CASCADE, related_name="config_versions")
+    version = models.PositiveIntegerField()
+    payload = models.JSONField(default=dict)
+    signature = models.CharField(max_length=64, db_index=True)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="manual")
+    validation_status = models.CharField(max_length=30, choices=VALIDATION_CHOICES, default="candidate")
+    parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="children")
+    experiment_plan = models.ForeignKey(RagExperimentPlan, null=True, blank=True, on_delete=models.SET_NULL, related_name="config_versions")
+    winner_variant = models.ForeignKey(RagExperimentVariant, null=True, blank=True, on_delete=models.SET_NULL, related_name="config_versions")
+    release_eval_run = models.ForeignKey(RagEvalRun, null=True, blank=True, on_delete=models.SET_NULL, related_name="release_config_versions")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="rag_config_versions")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-version"]
+        constraints = [models.UniqueConstraint(fields=["kb", "version"], name="unique_rag_config_version")]
+
+
+class RagConfigDeployment(models.Model):
+    OPERATION_CHOICES = [("publish", "Publish"), ("rollback", "Rollback")]
+    kb = models.ForeignKey(KnowledgeBase, on_delete=models.CASCADE, related_name="config_deployments")
+    previous_version = models.ForeignKey(RagConfigVersion, null=True, blank=True, on_delete=models.SET_NULL, related_name="deployments_from")
+    target_version = models.ForeignKey(RagConfigVersion, on_delete=models.PROTECT, related_name="deployments_to")
+    action = models.ForeignKey(RagAgentAction, null=True, blank=True, on_delete=models.SET_NULL, related_name="config_deployments")
+    operation = models.CharField(max_length=20, choices=OPERATION_CHOICES)
+    reason = models.TextField(blank=True, default="")
+    deployed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="rag_config_deployments")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+
+class DocumentParseBenchmarkCase(models.Model):
+    SUITE_CHOICES = RagBenchmarkCase.SUITE_CHOICES
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="document_parse_cases")
+    case_id = models.CharField(max_length=120)
+    title = models.CharField(max_length=200)
+    file = models.FileField(upload_to="parse_eval_cases/%Y/%m/%d/")
+    suite = models.CharField(max_length=30, choices=SUITE_CHOICES, default="benchmark")
+    tags = models.JSONField(default=list, blank=True)
+    expected_page_count = models.PositiveIntegerField(null=True, blank=True)
+    expected_ocr_pages = models.JSONField(default=list, blank=True)
+    expected_headings = models.JSONField(default=list, blank=True)
+    expected_terms_by_page = models.JSONField(default=dict, blank=True)
+    expected_block_types = models.JSONField(default=list, blank=True)
+    expected_table_terms = models.JSONField(default=list, blank=True)
+    thresholds = models.JSONField(default=dict, blank=True)
+    enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["case_id", "id"]
+        constraints = [models.UniqueConstraint(fields=["owner", "case_id"], name="unique_parse_case_per_owner")]
+
+
+class DocumentParseEvalRun(models.Model):
+    STATUS_CHOICES = [("queued", "Queued"), ("running", "Running"), ("completed", "Completed"), ("failed", "Failed")]
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="document_parse_eval_runs")
+    suite = models.CharField(max_length=30, choices=RagBenchmarkCase.SUITE_CHOICES, default="benchmark")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    celery_task_id = models.CharField(max_length=100, blank=True, default="")
+    case_count = models.PositiveIntegerField(default=0)
+    passed_count = models.PositiveIntegerField(default=0)
+    summary = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+
+class DocumentParseEvalCaseResult(models.Model):
+    run = models.ForeignKey(DocumentParseEvalRun, on_delete=models.CASCADE, related_name="case_results")
+    case = models.ForeignKey(DocumentParseBenchmarkCase, on_delete=models.PROTECT, related_name="eval_results")
+    passed = models.BooleanField(default=False)
+    metrics = models.JSONField(default=dict, blank=True)
+    checks = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True, default="")
+    duration_ms = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["id"]
 
 class ModelCallLog(models.Model):
     STATUS_CHOICES = [

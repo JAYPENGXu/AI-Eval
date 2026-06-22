@@ -9,25 +9,28 @@
             <span v-if="latestTrace">Trace #{{ latestTrace.id }}</span>
           </div>
           <el-form class="rag-options element-toolbar" label-position="top">
+            <el-form-item label="临时参数覆盖">
+              <el-switch v-model="ragOptions.override_enabled" active-text="启用" inactive-text="使用活跃配置" />
+            </el-form-item>
             <el-form-item label="Query Rewrite">
-              <el-select v-model="ragOptions.query_rewrite_strategy">
+              <el-select v-model="ragOptions.query_rewrite_strategy" :disabled="!ragOptions.override_enabled">
                 <el-option v-for="option in queryRewriteStrategies" :key="option.value" :label="option.label" :value="option.value" />
               </el-select>
             </el-form-item>
             <el-form-item label="Vector top_k">
-              <el-input-number v-model="ragOptions.top_k" :min="1" :max="20" />
+              <el-input-number v-model="ragOptions.top_k" :disabled="!ragOptions.override_enabled" :min="1" :max="20" />
             </el-form-item>
             <el-form-item label="BM25 top_k">
-              <el-input-number v-model="ragOptions.bm25_top_k" :min="1" :max="20" />
+              <el-input-number v-model="ragOptions.bm25_top_k" :disabled="!ragOptions.override_enabled" :min="1" :max="20" />
             </el-form-item>
             <el-form-item label="RRF_K">
-              <el-input-number v-model="ragOptions.rrf_k" :min="1" :max="500" />
+              <el-input-number v-model="ragOptions.rrf_k" :disabled="!ragOptions.override_enabled" :min="1" :max="500" />
             </el-form-item>
             <el-form-item label="Rerank top_n">
-              <el-input-number v-model="ragOptions.rerank_top_n" :min="1" :max="20" />
+              <el-input-number v-model="ragOptions.rerank_top_n" :disabled="!ragOptions.override_enabled" :min="1" :max="20" />
             </el-form-item>
             <el-form-item label="Context Compression">
-              <el-select v-model="ragOptions.compression_strategy">
+              <el-select v-model="ragOptions.compression_strategy" :disabled="!ragOptions.override_enabled">
                 <el-option v-for="option in compressionStrategies" :key="option.value" :label="option.label" :value="option.value" />
               </el-select>
             </el-form-item>
@@ -39,6 +42,7 @@
               <span>意图：{{ formatIntent(latestTrace.query_intent || latestTrace.settings?.query_intent) }}</span>
               <span>路由：{{ formatRoute(latestTrace.route_decision || latestTrace.settings?.route_decision) }}</span>
               <span>模式：{{ latestTrace.retrieval_mode }}</span>
+              <span>配置：v{{ latestTrace.settings?.config_version || '-' }} · {{ latestTrace.settings?.config_source || '-' }}</span>
               <span>Top K：{{ latestTrace.settings?.rag_top_k }}</span>
               <span>向量库：{{ latestTrace.settings?.vector_store }}</span>
               <span>Embedding：{{ latestTrace.settings?.embedding_model }}</span>

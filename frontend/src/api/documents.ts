@@ -31,7 +31,7 @@ export const documentApi = {
       },
     ),
   indexDocument: (id: number, payload: Record<string, unknown>) =>
-    request<{ chunk_count: number }>(`/documents/${id}/index/`, {
+    request<any>(`/documents/${id}/index/`, {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

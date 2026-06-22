@@ -9,6 +9,8 @@ from django.conf import settings
 from django.utils import timezone
 
 from .bm25 import bm25_search
+from .config_versions import resolve_runtime_config
+from .index_lifecycle import index_health
 from .compression import compress_context
 from .hybrid import rrf_fusion
 from .indexing import get_openai_client
@@ -70,7 +72,13 @@ def build_rag_options(raw_options: dict | None) -> dict:
 
 def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | None = None) -> tuple[str, list[dict], RagTrace]:
     pipeline_started_at = timezone.now()
-    rag_options = build_rag_options(rag_options)
+    raw_options = rag_options or {}
+    resolved_options, config_meta = resolve_runtime_config(
+        session.kb, raw_options, override_enabled=bool(raw_options.get("override_enabled"))
+    )
+    rag_options = build_rag_options(resolved_options)
+    index_states = [index_health(document) for document in session.kb.documents.all()]
+    index_warnings = [reason for state in index_states for reason in state["reasons"]]
     conversation_context = recent_conversation_context(session, question)
     session_summary = get_session_summary_text(session)
     summary_meta = session_summary_metadata(session, session_summary)
@@ -111,6 +119,9 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
             settings={
                 **route_payload,
                 "query_router": route_payload,
+                **config_meta,
+                "index_health": index_states,
+                "index_warnings": index_warnings,
                 "query_rewrite_strategy": rewrite_result["rewrite_strategy"],
                 "conversation_rewrite_strategy": conversation_rewrite["conversation_rewrite_strategy"],
                 "conversation_context": conversation_context,
@@ -125,6 +136,8 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
             },
         )
         return prompt, [], trace
+    if any(state["critical"] for state in index_states):
+        raise RuntimeError("知识库索引的 Embedding 维度与当前配置不兼容，请先重建索引。")
     compression_strategy = rag_options.get("compression_strategy")
     compression_enabled = rag_options.get("compression_enabled")
     try:
@@ -203,6 +216,9 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
         settings={
             **route_payload,
             "query_router": route_payload,
+            **config_meta,
+            "index_health": index_states,
+            "index_warnings": index_warnings,
             "vector_store": settings.VECTOR_STORE,
             "milvus_collection": settings.MILVUS_COLLECTION,
             "embedding_model": settings.EMBEDDING_MODEL,

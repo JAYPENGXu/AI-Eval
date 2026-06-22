@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 import time
 
 from django.conf import settings
@@ -183,12 +182,12 @@ def maybe_schedule_session_summary_update(session: ChatSession) -> None:
     try:
         with transaction.atomic():
             summary_state, _ = ChatSessionSummary.objects.select_for_update().get_or_create(session=session)
-            if summary_state.status == "running":
+            if summary_state.status in {"queued", "running"}:
                 return
             needs_retry = summary_state.status == "failed" or not (summary_state.summary or "").strip()
             if not needs_retry and message_count - summary_state.summary_message_count < trigger_messages:
                 return
-            summary_state.status = "running"
+            summary_state.status = "queued"
             summary_state.error_message = ""
             summary_state.last_started_at = timezone.now()
             summary_state.save(update_fields=["status", "error_message", "last_started_at", "updated_at"])
@@ -196,9 +195,14 @@ def maybe_schedule_session_summary_update(session: ChatSession) -> None:
         logger.exception("session summary schedule failed session=%s", session.id)
         return
 
-    thread = threading.Thread(target=run_session_summary_update, args=(session.id,), daemon=True)
-    thread.start()
-    logger.info("session summary scheduled session=%s message_count=%s", session.id, message_count)
+    from .tasks import session_summary_task
+    try:
+        result = session_summary_task.apply_async(args=[session.id], queue="summaries")
+        ChatSessionSummary.objects.filter(session=session, status="queued").update(celery_task_id=result.id)
+        logger.info("session summary queued session=%s message_count=%s", session.id, message_count)
+    except Exception as exc:
+        ChatSessionSummary.objects.filter(session=session).update(status="failed", error_message=f"摘要任务入队失败：{exc}")
+        logger.exception("session summary enqueue failed session=%s", session.id)
 
 
 def recent_conversation_context(session: ChatSession, current_question: str, turns: int | None = None) -> list[dict]:

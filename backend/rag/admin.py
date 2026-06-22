@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import ChatMessage, ChatSession, ChatSessionSummary, Chunk, Document, DocumentPage, DocumentParseRun, KnowledgeBase, ModelCallLog
+from .models import ChatMessage, ChatSession, ChatSessionSummary, Chunk, Document, DocumentIndexRun, DocumentPage, DocumentParseRun, DocumentParseBenchmarkCase, DocumentParseEvalRun, KnowledgeBase, ModelCallLog, RagConfigDeployment, RagConfigVersion
 
 
 @admin.register(KnowledgeBase)
@@ -53,3 +53,9 @@ class DocumentParseRunAdmin(admin.ModelAdmin):
 class DocumentPageAdmin(admin.ModelAdmin):
     list_display = ("id", "parse_run", "page_number", "extraction_method", "char_count", "is_blank")
     list_filter = ("extraction_method", "is_blank")
+
+admin.site.register(DocumentIndexRun)
+admin.site.register(DocumentParseBenchmarkCase)
+admin.site.register(DocumentParseEvalRun)
+admin.site.register(RagConfigVersion)
+admin.site.register(RagConfigDeployment)

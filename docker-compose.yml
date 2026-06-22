@@ -4,6 +4,11 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   backend:
@@ -27,6 +32,11 @@ services:
       GUNICORN_TIMEOUT: "3600"
     depends_on:
       - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live/', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     volumes:
       - backend_db:/app/db_data
       - backend_media:/app/media
@@ -41,7 +51,7 @@ services:
         hard: 65535
     restart: unless-stopped
 
-  parser-worker:
+  celery-worker:
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -54,9 +64,14 @@ services:
       LANGGRAPH_CHECKPOINT_DB: "/app/agent_state/langgraph_checkpoints.sqlite3"
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/1"
-    command: celery -A assistant_backend worker --loglevel=INFO --concurrency=1 --queues=celery
+    command: celery -A assistant_backend worker --loglevel=INFO --concurrency=1 --queues=documents,evaluations,summaries,orchestration
     depends_on:
       - redis
+    healthcheck:
+      test: ["CMD", "celery", "-A", "assistant_backend", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     volumes:
       - backend_db:/app/db_data
       - backend_media:/app/media
