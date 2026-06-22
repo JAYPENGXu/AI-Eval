@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import ChatMessage, ChatSession, ChatSessionSummary, Chunk, Document, DocumentIndexRun, DocumentPage, DocumentParseRun, DocumentParseBenchmarkCase, DocumentParseEvalRun, KnowledgeBase, ModelCallLog, RagConfigDeployment, RagConfigVersion
+from .models import AccessPolicy, AuthorizationAuditLog, Membership, Organization, Role, ChatMessage, ChatSession, ChatSessionSummary, Chunk, Document, DocumentIndexRun, DocumentPage, DocumentParseRun, DocumentParseBenchmarkCase, DocumentParseEvalRun, KnowledgeBase, ModelCallLog, RagConfigDeployment, RagConfigVersion
 
 
 @admin.register(KnowledgeBase)
@@ -59,3 +59,30 @@ admin.site.register(DocumentParseBenchmarkCase)
 admin.site.register(DocumentParseEvalRun)
 admin.site.register(RagConfigVersion)
 admin.site.register(RagConfigDeployment)
+
+
+@admin.register(Organization)
+class OrganizationAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "slug", "created_by", "created_at")
+    search_fields = ("name", "slug")
+
+@admin.register(Membership)
+class MembershipAdmin(admin.ModelAdmin):
+    list_display = ("id", "organization", "user", "status", "department", "clearance")
+    list_filter = ("status", "clearance", "organization")
+
+@admin.register(Role)
+class RoleAdmin(admin.ModelAdmin):
+    list_display = ("id", "organization", "name", "slug", "is_system")
+    list_filter = ("is_system", "organization")
+
+@admin.register(AccessPolicy)
+class AccessPolicyAdmin(admin.ModelAdmin):
+    list_display = ("id", "organization", "name", "classification", "visibility", "version", "is_active")
+    list_filter = ("classification", "visibility", "is_active", "organization")
+
+@admin.register(AuthorizationAuditLog)
+class AuthorizationAuditLogAdmin(admin.ModelAdmin):
+    list_display = ("id", "organization", "actor", "action", "resource_type", "resource_id", "allowed", "created_at")
+    list_filter = ("allowed", "action", "organization")
+    readonly_fields = [field.name for field in AuthorizationAuditLog._meta.fields]

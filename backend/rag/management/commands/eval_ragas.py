@@ -54,7 +54,7 @@ class Command(BaseCommand):
             default=None,
             help="Override context compression strategy: none, sentence_filter, structure_aware, or llm.",
         )
-        parser.add_argument("--suite", default=None, help="Run only enabled benchmark cases in a suite: smoke, benchmark, regression, or release.")
+        parser.add_argument("--suite", default=None, help="Run only enabled benchmark cases in a suite: smoke, benchmark, regression, release, or security.")
         parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N cases.")
         parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         parser.add_argument("--output", default=None, help="Optional path to save JSON results.")
@@ -62,6 +62,17 @@ class Command(BaseCommand):
         parser.add_argument("--run-id", type=int, default=None, help="Update an existing RagEvalRun instead of creating one.")
 
     def handle(self, *args, **options):
+        kb = self.get_kb(options["kb_id"])
+        if options.get("suite") == "security":
+            from rag.security_evaluation import execute_security_eval_run
+            if options.get("no_save"):
+                raise CommandError("Security suite requires a persisted Eval Run.")
+            eval_run = RagEvalRun.objects.get(id=options["run_id"], kb=kb) if options.get("run_id") else RagEvalRun.objects.create(kb=kb, status="running", metrics=[], settings={"suite": "security"})
+            eval_run.status = "running"; eval_run.settings = {**(eval_run.settings or {}), "suite": "security", "retrieval_only": True}; eval_run.started_at = timezone.now(); eval_run.finished_at = None
+            eval_run.save(update_fields=["status", "settings", "started_at", "finished_at"])
+            execute_security_eval_run(eval_run, options)
+            self.stdout.write(self.style.SUCCESS(f"Security Eval Run #{eval_run.id} completed."))
+            return
         ragas_runtime = self.load_ragas_runtime()
         kb = self.get_kb(options["kb_id"])
         if not kb:

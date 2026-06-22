@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from django.utils import timezone
 
+from .access_control import filter_knowledge_bases_for_user, require_capability
 from .eval_runs import reconcile_stale_eval_run
 from .models import KnowledgeBase, RagAgentAction, RagBenchmarkCase, RagConfigVersion, RagEvalRun, RagExperimentPlan, RagExperimentVariant
 
@@ -18,9 +19,10 @@ class ExperimentPlanResult:
 
 
 def create_experiment_plan(*, user, kb_id: int, baseline_run_id: int, goal: str) -> ExperimentPlanResult:
-    kb = KnowledgeBase.objects.filter(id=kb_id, owner=user).first()
+    kb = filter_knowledge_bases_for_user(user, KnowledgeBase.objects.filter(id=kb_id), capability="use_agent").first()
     if not kb:
         raise ValueError("Knowledge base not found.")
+    require_capability(user, "use_agent", kb=kb)
     baseline = (
         RagEvalRun.objects.filter(id=baseline_run_id, kb=kb)
         .prefetch_related("case_results")
@@ -172,6 +174,7 @@ def start_experiment_plan(*, user, plan_id: int) -> RagExperimentPlan:
     )
     if not plan:
         raise ValueError("Experiment plan not found.")
+    require_capability(user, "use_agent", kb=plan.kb)
     if plan.status == "completed":
         return plan
     plan.status = "running"

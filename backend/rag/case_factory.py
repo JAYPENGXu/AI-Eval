@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .access_control import filter_knowledge_bases_for_user, filter_traces_for_user, require_capability
 from .models import RagBenchmarkCase, RagEvalCaseResult, RagTrace
 
 
@@ -15,13 +16,14 @@ class CaseCreateResult:
 def create_regression_case_from_trace(*, user, trace_id: int, payload: dict[str, Any] | None = None) -> CaseCreateResult:
     payload = payload or {}
     trace = (
-        RagTrace.objects.filter(id=trace_id, session__owner=user)
+        filter_traces_for_user(user, RagTrace.objects.filter(id=trace_id))
         .select_related("session", "session__kb", "message")
         .first()
     )
     if not trace:
         raise ValueError("Trace not found.")
 
+    require_capability(user, "run_evaluations", kb=trace.session.kb)
     case_id = payload.get("case_id") or f"trace_{trace.id}"
     trace_answer = trace.message.content if trace.message else ""
     reference = payload.get("reference") or trace_answer or "TODO: please review reference answer."
@@ -55,13 +57,14 @@ def create_regression_case_from_trace(*, user, trace_id: int, payload: dict[str,
 def create_regression_case_from_eval_case(*, user, eval_case_result_id: int, payload: dict[str, Any] | None = None) -> CaseCreateResult:
     payload = payload or {}
     result = (
-        RagEvalCaseResult.objects.filter(id=eval_case_result_id, run__kb__owner=user)
+        RagEvalCaseResult.objects.filter(id=eval_case_result_id, run__kb_id__in=filter_knowledge_bases_for_user(user, capability="run_evaluations").values("id"))
         .select_related("run", "run__kb")
         .first()
     )
     if not result:
         raise ValueError("Eval case result not found.")
 
+    require_capability(user, "run_evaluations", kb=result.run.kb)
     diagnostics = result.diagnostics or {}
     stages = diagnostics.get("stages") or {}
     failed_stages = [key for key, value in stages.items() if not value.get("hit")]
@@ -122,6 +125,7 @@ def create_regression_case_from_user_feedback(*, user, feedback_id: int, payload
         raise ValueError("Feedback has no trace.")
 
     trace = feedback.trace
+    require_capability(user, "run_evaluations", kb=feedback.session.kb)
     case_id = payload.get("case_id") or f"feedback_{feedback.id}_trace_{trace.id}"
     reference = payload.get("reference") or feedback.message.content or "TODO: please review reference answer."
     defaults = {

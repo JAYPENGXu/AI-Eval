@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from django.utils import timezone
 
+from rag.access_control import build_access_scope, require_capability
 from rag.case_factory import (
     create_regression_case_from_eval_case,
     create_regression_case_from_trace,
@@ -20,6 +21,11 @@ def execute_agent_action(*, user, action: RagAgentAction) -> dict:
     if action.status == "running" and action.action_type == "run_experiment_plan":
         return action.result or {"plan_id": action.payload.get("experiment_plan"), "status": "running"}
 
+    if not action.kb_id:
+        raise ValueError("Agent action has no knowledge base.")
+    scope = require_capability(user, "use_agent", kb=action.kb)
+    if not scope.can_knowledge_base(action.kb, "use_agent"):
+        raise PermissionError("Agent action resource access denied.")
     action.confirmed_at = action.confirmed_at or timezone.now()
     action.error_message = ""
     action.save(update_fields=["confirmed_at", "error_message", "updated_at"])
@@ -38,7 +44,7 @@ def execute_agent_action(*, user, action: RagAgentAction) -> dict:
 
     if action.action_type in {"publish_rag_config", "rollback_rag_config"}:
         from rag.config_versions import deploy_config
-        target = RagConfigVersion.objects.filter(id=action.payload.get("config_version"), kb=action.kb, kb__owner=user).first()
+        target = RagConfigVersion.objects.filter(id=action.payload.get("config_version"), kb=action.kb).first()
         if not target:
             raise ValueError("Config version not found.")
         operation = "publish" if action.action_type == "publish_rag_config" else "rollback"

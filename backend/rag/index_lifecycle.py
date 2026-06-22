@@ -8,11 +8,11 @@ from django.utils import timezone
 from .indexing import resolve_parse_run
 from .models import DocumentIndexRun
 logger = logging.getLogger(__name__)
-INDEX_SCHEMA_VERSION = "2"
+INDEX_SCHEMA_VERSION = "3"
 
 
 def build_index_manifest(document, parse_run, method, options):
-    return {"file_sha256": document.sha256, "parse_run_id": parse_run.id, "parser": parse_run.parser, "parser_version": parse_run.parser_version, "chunk_method": method, "chunk_options": options or {}, "embedding_model": settings.EMBEDDING_MODEL, "embedding_dimensions": int(settings.EMBEDDING_DIMENSIONS), "vector_backend": "milvus", "vector_collection": settings.MILVUS_COLLECTION, "index_schema_version": INDEX_SCHEMA_VERSION}
+    return {"file_sha256": document.sha256, "parse_run_id": parse_run.id, "parser": parse_run.parser, "parser_version": parse_run.parser_version, "chunk_method": method, "chunk_options": options or {}, "embedding_model": settings.EMBEDDING_MODEL, "embedding_dimensions": int(settings.EMBEDDING_DIMENSIONS), "vector_backend": settings.VECTOR_STORE, "vector_collection": settings.MILVUS_COLLECTION, "index_schema_version": INDEX_SCHEMA_VERSION, "organization_id": document.kb.organization_id, "access_policy_id": document.access_policy_id}
 
 
 def sign_manifest(manifest):
@@ -25,7 +25,7 @@ def index_health(document):
     latest = document.parse_runs.filter(status="completed").order_by("-created_at", "-id").first()
     if not document.index_signature or not manifest: reasons.append({"code": "missing_manifest", "severity": "warning", "message": "旧索引缺少版本签名，请重建。"})
     if latest and manifest.get("parse_run_id") != latest.id: reasons.append({"code": "newer_parse_run", "severity": "warning", "message": "存在更新的解析结果。"})
-    for key, current in {"embedding_model": settings.EMBEDDING_MODEL, "vector_collection": settings.MILVUS_COLLECTION, "index_schema_version": INDEX_SCHEMA_VERSION}.items():
+    for key, current in {"embedding_model": settings.EMBEDDING_MODEL, "vector_collection": settings.MILVUS_COLLECTION, "index_schema_version": INDEX_SCHEMA_VERSION, "organization_id": document.kb.organization_id, "access_policy_id": document.access_policy_id}.items():
         if manifest and str(manifest.get(key)) != str(current): reasons.append({"code": f"{key}_changed", "severity": "warning", "message": f"{key} 已变化。"})
     if manifest and int(manifest.get("embedding_dimensions") or 0) != int(settings.EMBEDDING_DIMENSIONS): reasons.append({"code": "embedding_dimensions_changed", "severity": "critical", "message": "Embedding 维度与现有索引不兼容。"})
     critical = any(item["severity"] == "critical" for item in reasons)

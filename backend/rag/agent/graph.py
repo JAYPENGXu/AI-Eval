@@ -23,6 +23,7 @@ except ImportError:
 from rag.agent.actions import execute_agent_action
 from rag.model_usage import elapsed_ms, extract_usage, record_model_call
 from rag.experiments import create_experiment_action, create_experiment_plan
+from rag.access_control import filter_knowledge_bases_for_user, filter_traces_for_user, require_capability
 from rag.models import KnowledgeBase, RagAgentAction, RagEvalCaseResult, RagEvalRun, RagTrace
 from rag.services import get_openai_client
 
@@ -125,6 +126,24 @@ def serialize_agent_result(state: AgentState, *, thread_id: str, thread_business
     }
 
 
+def authorize_agent_context(user, values: dict) -> None:
+    kb_id = values.get("kb_id")
+    trace_id = values.get("trace_id")
+    eval_run_id = values.get("eval_run_id")
+    compare_id = values.get("compare_eval_run_id")
+    allowed_kbs = filter_knowledge_bases_for_user(user, capability="use_agent")
+    if kb_id:
+        kb = allowed_kbs.filter(id=kb_id).first()
+        if not kb:
+            raise PermissionError("Agent knowledge base access denied.")
+        require_capability(user, "use_agent", kb=kb)
+    if trace_id and not filter_traces_for_user(user, RagTrace.objects.filter(id=trace_id)).exists():
+        raise PermissionError("Agent Trace access denied.")
+    for run_id in (eval_run_id, compare_id):
+        if run_id and not RagEvalRun.objects.filter(id=run_id, kb_id__in=allowed_kbs.values("id")).exists():
+            raise PermissionError("Agent Eval Run access denied.")
+
+
 def run_ragops_agent(
     *,
     user,
@@ -138,6 +157,7 @@ def run_ragops_agent(
 ) -> dict:
     if not thread_id:
         raise ValueError("thread_id is required for RAGOps Agent runs.")
+    authorize_agent_context(user, {"kb_id": kb_id, "trace_id": trace_id, "eval_run_id": eval_run_id, "compare_eval_run_id": compare_eval_run_id})
 
     graph = build_graph()
     config = graph_config(thread_id)
@@ -190,6 +210,7 @@ def get_ragops_agent_state(*, user, thread_id: str) -> dict | None:
     if not snapshot or not snapshot.values:
         return None
     assert_thread_owner(snapshot, user)
+    authorize_agent_context(user, snapshot.values)
     business_key = (snapshot.values.get("thread_business_key") or "")
     return serialize_agent_result(snapshot.values, thread_id=thread_id, thread_business_key=business_key, snapshot=snapshot)
 
@@ -206,6 +227,7 @@ def resume_ragops_agent(*, user, thread_id: str, resume_payload: dict) -> dict:
     if not snapshot or not snapshot.values:
         raise ValueError("Agent thread not found.")
     assert_thread_owner(snapshot, user)
+    authorize_agent_context(user, snapshot.values)
     if not is_thread_interrupted(snapshot):
         raise ValueError("Agent thread is not awaiting human decision.")
 
@@ -802,7 +824,7 @@ def propose_regression_decisions(state: AgentState, diagnosis: dict | None = Non
         signals = diagnosis.get("failure_signals") or []
         if signals:
             trace_id = trace_payload["id"]
-            trace = RagTrace.objects.filter(id=trace_id, session__owner_id=state["user_id"]).select_related("session__kb").first()
+            trace = filter_traces_for_user(state_user(state), RagTrace.objects.filter(id=trace_id)).select_related("session__kb").first()
             if trace:
                 signal_labels = " / ".join(signal["label"] for signal in signals[:3])
                 decisions.append(
@@ -825,7 +847,7 @@ def propose_regression_decisions(state: AgentState, diagnosis: dict | None = Non
     if eval_run_id:
         candidate = first_failed_eval_case_result_id(state)
         if candidate:
-            eval_case = RagEvalCaseResult.objects.filter(id=candidate, run__kb__owner_id=state["user_id"]).select_related("run__kb").first()
+            eval_case = RagEvalCaseResult.objects.filter(id=candidate, run__kb_id__in=filter_knowledge_bases_for_user(state_user(state), capability="use_agent").values("id")).select_related("run__kb").first()
             if eval_case:
                 decisions.append(
                     {
@@ -1089,10 +1111,13 @@ def persist_action_card(
     eval_case_result_id=None,
 ) -> dict:
     user = state_user(state)
-    kb = KnowledgeBase.objects.filter(id=kb_id, owner=user).first() if kb_id else None
-    trace = RagTrace.objects.filter(id=trace_id, session__owner=user).first() if trace_id else None
-    eval_run = RagEvalRun.objects.filter(id=eval_run_id, kb__owner=user).first() if eval_run_id else None
-    eval_case_result = RagEvalCaseResult.objects.filter(id=eval_case_result_id, run__kb__owner=user).first() if eval_case_result_id else None
+    allowed_kbs = filter_knowledge_bases_for_user(user, capability="use_agent")
+    kb = allowed_kbs.filter(id=kb_id).first() if kb_id else None
+    trace = filter_traces_for_user(user, RagTrace.objects.filter(id=trace_id)).first() if trace_id else None
+    eval_run = RagEvalRun.objects.filter(id=eval_run_id, kb_id__in=allowed_kbs.values("id")).first() if eval_run_id else None
+    eval_case_result = RagEvalCaseResult.objects.filter(id=eval_case_result_id, run__kb_id__in=allowed_kbs.values("id")).first() if eval_case_result_id else None
+    if kb_id and not kb:
+        raise PermissionError("Agent action resource access denied.")
     action, created = RagAgentAction.objects.get_or_create(
         owner=state_user(state),
         action_uid=uid,

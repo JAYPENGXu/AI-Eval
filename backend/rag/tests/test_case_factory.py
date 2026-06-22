@@ -8,17 +8,22 @@ from rag.case_factory import (
     create_regression_case_from_trace,
     create_regression_case_from_user_feedback,
 )
+from rag.tenancy import bootstrap_user_organization
 from rag.models import ChatMessage, ChatSession, KnowledgeBase, RagEvalCaseResult, RagEvalRun, RagTrace, RagUserFeedback
 
 
 @pytest.fixture
 def owner(db):
-    return get_user_model().objects.create_user(username="case-owner", password="pass")
+    user = get_user_model().objects.create_user(username="case-owner", password="pass")
+    bootstrap_user_organization(user)
+    return user
 
 
 @pytest.fixture
 def kb(owner):
-    return KnowledgeBase.objects.create(owner=owner, name="KB")
+    organization = owner.organization_memberships.get(status="active").organization
+    policy = organization.access_policies.first()
+    return KnowledgeBase.objects.create(owner=owner, organization=organization, access_policy=policy, visibility="private", name="KB")
 
 
 @pytest.fixture
@@ -27,6 +32,8 @@ def trace(owner, kb):
     answer = ChatMessage.objects.create(session=session, role="assistant", content="原始回答，仍需专家复核。")
     return RagTrace.objects.create(
         session=session,
+        organization=kb.organization,
+        access_policy_ids=[kb.access_policy_id],
         message=answer,
         question="需求评审阶段需要哪些输入？",
         rewritten_query="需求评审 输入",

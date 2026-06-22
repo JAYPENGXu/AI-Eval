@@ -6,6 +6,7 @@ from typing import Iterable
 
 from django.conf import settings
 
+from .access_control import audit_access, build_access_scope
 from .indexing import embed_texts
 from .models import Chunk, KnowledgeBase
 from .source_metadata import source_location
@@ -36,9 +37,9 @@ def format_source(chunk: Chunk, score: float, rank: int, engine: str) -> dict:
     }
 
 
-def retrieve_with_sqlite(kb: KnowledgeBase, query_embedding: list[float], top_k: int) -> list[dict]:
+def retrieve_with_sqlite(kb: KnowledgeBase, query_embedding: list[float], top_k: int, scope) -> list[dict]:
     scored = []
-    for chunk in Chunk.objects.filter(kb=kb).exclude(embedding__isnull=True).select_related("document"):
+    for chunk in scope.filter_chunks(Chunk.objects.filter(kb=kb)).exclude(embedding__isnull=True).select_related("document"):
         scored.append((cosine(query_embedding, chunk.embedding), chunk))
     scored.sort(key=lambda item: item[0], reverse=True)
     return [
@@ -47,11 +48,16 @@ def retrieve_with_sqlite(kb: KnowledgeBase, query_embedding: list[float], top_k:
     ]
 
 
-def retrieve(kb: KnowledgeBase, question: str, top_k: int | None = None, context: dict | None = None) -> list[dict]:
-    query_embedding = embed_texts([question], call_type="embedding_query", owner=kb.owner, kb=kb, **(context or {}))[0]
+def retrieve(kb: KnowledgeBase, question: str, top_k: int | None = None, context: dict | None = None, scope=None) -> list[dict]:
+    context = context or {}
+    scope = scope or build_access_scope(context.get("owner") or getattr(context.get("session"), "owner", None) or kb.owner, kb=kb)
+    if not scope.can_knowledge_base(kb, "query"):
+        audit_access(scope, "query", kb, False, "knowledge_base_denied")
+        raise PermissionError("Knowledge base access denied.")
+    query_embedding = embed_texts([question], call_type="embedding_query", owner=context.get("owner") or getattr(context.get("session"), "owner", None) or kb.owner, kb=kb, **{k: v for k, v in context.items() if k != "owner"})[0]
     limit = top_k or settings.RAG_TOP_K
     try:
-        vector_hits = get_vector_store().search(kb, query_embedding, limit)
+        vector_hits = get_vector_store().search(kb, query_embedding, limit, scope=scope)
     except Exception as exc:
         logger.warning("milvus vector search failed kb=%s error=%s", kb.id, exc)
         vector_hits = []
@@ -59,7 +65,7 @@ def retrieve(kb: KnowledgeBase, question: str, top_k: int | None = None, context
     if vector_hits:
         chunk_map = {
             chunk.id: chunk
-            for chunk in Chunk.objects.filter(id__in=[hit["chunk_id"] for hit in vector_hits]).select_related("document")
+            for chunk in scope.filter_chunks(Chunk.objects.filter(id__in=[hit["chunk_id"] for hit in vector_hits])).select_related("document")
         }
         results = []
         for hit in vector_hits:
@@ -67,6 +73,9 @@ def retrieve(kb: KnowledgeBase, question: str, top_k: int | None = None, context
             if not chunk:
                 continue
             results.append(format_source(chunk, hit["score"], hit["rank"], hit["engine"]))
+        rejected = len(vector_hits) - len(results)
+        if rejected:
+            audit_access(scope, "vector_post_filter", kb, False, "unauthorized_hits_removed", {"count": rejected})
         return results
 
-    return retrieve_with_sqlite(kb, query_embedding, limit)
+    return retrieve_with_sqlite(kb, query_embedding, limit, scope)

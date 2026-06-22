@@ -1,6 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
+from .permission_views import AccessPolicyViewSet, AuthorizationAuditLogViewSet, ChunkAccessViewSet, OrganizationViewSet
 from .views import (
     ChatSessionViewSet,
     DocumentViewSet,
@@ -29,6 +30,10 @@ from .views import (
 )
 
 router = DefaultRouter()
+router.register("organizations", OrganizationViewSet, basename="organization")
+router.register("access-policies", AccessPolicyViewSet, basename="access-policy")
+router.register("authorization-audit-logs", AuthorizationAuditLogViewSet, basename="authorization-audit-log")
+router.register("chunks", ChunkAccessViewSet, basename="chunk-access")
 router.register("knowledge-bases", KnowledgeBaseViewSet, basename="knowledge-base")
 router.register("documents", DocumentViewSet, basename="document")
 router.register("chat-sessions", ChatSessionViewSet, basename="chat-session")

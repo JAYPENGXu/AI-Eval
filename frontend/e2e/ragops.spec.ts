@@ -45,3 +45,45 @@ test('upload, parse evaluation and workbench login', async ({ page, request }) =
   response = await request.post(`${api}/reset-workspace/`, { headers, data: {} })
   expect(response.ok()).toBeTruthy()
 })
+
+test('organization policy isolates confidential documents', async ({ page, request }) => {
+  const suffix = Date.now(), password = 'e2e-secret'
+  const ownerName = `acl_owner_${suffix}`, employeeName = `acl_employee_${suffix}`
+  const api = 'http://127.0.0.1:8010/api'
+  const registerAndLogin = async (username: string) => {
+    expect((await request.post(`${api}/auth/register/`, { data: { username, password } })).ok()).toBeTruthy()
+    const login = await request.post(`${api}/auth/login/`, { data: { username, password } })
+    return (await login.json()).access as string
+  }
+  const ownerToken = await registerAndLogin(ownerName), employeeToken = await registerAndLogin(employeeName)
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}` }, employeeHeaders = { Authorization: `Bearer ${employeeToken}` }
+  const me = await (await request.get(`${api}/auth/me/`, { headers: ownerHeaders })).json()
+  const organization = me.organizations[0]
+  const roles = await (await request.get(`${api}/organizations/${organization.id}/roles/`, { headers: ownerHeaders })).json()
+  const memberRole = roles.find((item: any) => item.slug === 'member')
+  expect((await request.post(`${api}/organizations/${organization.id}/memberships/`, { headers: ownerHeaders, data: { username: employeeName, status: 'active', department: 'engineering', clearance: 'internal', roles: [memberRole.id] } })).ok()).toBeTruthy()
+  const policies = await (await request.get(`${api}/access-policies/?organization=${organization.id}`, { headers: ownerHeaders })).json()
+  const privatePolicy = policies[0]
+  let response = await request.post(`${api}/access-policies/`, { headers: ownerHeaders, data: { organization: organization.id, name: `General ${suffix}`, classification: 'internal', visibility: 'organization', allowed_roles: [], allowed_users: [], denied_users: [], allowed_departments: [], is_active: true } })
+  const generalPolicy = await response.json()
+  response = await request.post(`${api}/knowledge-bases/`, { headers: ownerHeaders, data: { organization: organization.id, access_policy: generalPolicy.id, visibility: 'organization', name: `ACL KB ${suffix}` } })
+  const kb = await response.json()
+  const upload = async (name: string, policy: number, text: string) => request.post(`${api}/documents/`, { headers: ownerHeaders, multipart: { kb: String(kb.id), access_policy: String(policy), file: { name, mimeType: 'text/plain', buffer: Buffer.from(text) } } })
+  expect((await upload('handbook.txt', generalPolicy.id, 'engineering handbook')).status()).toBe(201)
+  expect((await upload('salary.txt', privatePolicy.id, 'executive salary 900000')).status()).toBe(201)
+  const employeeDocuments = await (await request.get(`${api}/documents/`, { headers: employeeHeaders })).json()
+  expect(employeeDocuments.map((item: any) => item.filename)).toContain('handbook.txt')
+  expect(employeeDocuments.map((item: any) => item.filename)).not.toContain('salary.txt')
+
+  await page.goto('/')
+  await page.getByPlaceholder('用户名').fill(ownerName)
+  await page.getByPlaceholder('密码').fill(password)
+  await page.getByRole('button', { name: '登录' }).click()
+  await page.getByText('权限', { exact: true }).click()
+  await expect(page.getByRole('heading', { name: '组织与权限' })).toBeVisible()
+  await page.getByRole('tab', { name: '成员' }).click()
+  await expect(page.getByText(employeeName)).toBeVisible()
+
+  response = await request.post(`${api}/reset-workspace/`, { headers: ownerHeaders, data: { organization: organization.id, confirm_shared: organization.slug } })
+  expect(response.ok()).toBeTruthy()
+})

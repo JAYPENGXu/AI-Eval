@@ -6,6 +6,13 @@
     </div>
 
     <div class="panel">
+      <h3>组织</h3>
+      <el-select :model-value="selectedOrganization?.id" placeholder="选择组织" @change="selectOrganization">
+        <el-option v-for="organization in organizations" :key="organization.id" :label="organization.name" :value="organization.id" />
+      </el-select>
+    </div>
+
+    <div class="panel">
       <h3>知识库</h3>
       <div class="inline">
         <el-input v-model="kbForm.name" placeholder="知识库名称" />
@@ -54,8 +61,10 @@
 </template>
 
 <script setup>
-defineProps({
+const props = defineProps({
   username: { type: String, default: '' },
+  organizations: { type: Array, default: () => [] },
+  selectedOrganization: { type: Object, default: null },
   kbs: { type: Array, default: () => [] },
   documents: { type: Array, default: () => [] },
   selectedKb: { type: Object, default: null },
@@ -64,11 +73,17 @@ defineProps({
   busy: { type: Object, required: true },
 })
 
+function selectOrganization(id) {
+  const organization = props.organizations.find((item) => item.id === id)
+  if (organization) emit('select-organization', organization)
+}
+
 function documentStatus(doc) {
   return { uploaded: '已上传', queued: '等待解析', parsing: '解析中', parsed: '解析完成', needs_review: '待确认', indexing: '索引中', indexed: '已索引', failed: '失败' }[doc.status] || doc.status
 }
 
-defineEmits([
+const emit = defineEmits([
+  'select-organization',
   'create-kb',
   'select-kb',
   'select-document',

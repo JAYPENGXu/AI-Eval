@@ -161,6 +161,8 @@ def index_document(
             document=document,
             kb=document.kb,
             parse_run=parse_run,
+            access_policy=document.access_policy,
+            inherits_policy=True,
             index=chunk["index"],
             content=chunk["content"],
             token_count=chunk["token_count"],

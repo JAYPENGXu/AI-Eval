@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from django.db.models import Avg, Count, Sum
 
+from rag.access_control import build_access_scope, filter_knowledge_bases_for_user, filter_traces_for_user
 from rag.models import ModelCallLog, RagEvalRun, RagTrace
 
 
@@ -23,7 +24,7 @@ def compact_sources(items: list[dict], limit: int = 5) -> list[dict]:
                 "rrf_score": item.get("rrf_score"),
                 "rerank_score": item.get("rerank_score"),
                 "pre_rerank_rank": item.get("pre_rerank_rank"),
-                "content": compact_text(item.get("content"), 700),
+                "snippet": compact_text(item.get("snippet"), 220),
                 "matched_terms": item.get("matched_terms") or [],
                 "sources": item.get("sources") or {},
                 "location": item.get("location") or {},
@@ -37,7 +38,7 @@ def compact_sources(items: list[dict], limit: int = 5) -> list[dict]:
 
 def get_trace_detail(*, user, trace_id: int) -> dict:
     trace = (
-        RagTrace.objects.filter(id=trace_id, session__owner=user)
+        filter_traces_for_user(user, RagTrace.objects.filter(id=trace_id))
         .select_related("session", "session__kb", "message")
         .first()
     )
@@ -60,7 +61,7 @@ def get_trace_detail(*, user, trace_id: int) -> dict:
             "compression_results": compact_sources(trace.compression_results),
             "compression_stats": trace.compression_stats,
             "settings": trace.settings,
-            "final_prompt_excerpt": compact_text(trace.final_prompt, 1800),
+            "final_prompt_excerpt": "",
         },
     }
 
@@ -116,7 +117,7 @@ def get_model_usage_summary(*, user, kb_id: int | None = None, trace_id: int | N
 
 def compare_eval_runs(*, user, left_run_id: int, right_run_id: int) -> dict:
     runs = list(
-        RagEvalRun.objects.filter(id__in=[left_run_id, right_run_id], kb__owner=user)
+        RagEvalRun.objects.filter(id__in=[left_run_id, right_run_id], kb_id__in=filter_knowledge_bases_for_user(user, capability="use_agent").values("id"))
         .select_related("kb")
         .prefetch_related("case_results")
     )

@@ -8,6 +8,7 @@ from typing import Iterator
 from django.conf import settings
 from django.utils import timezone
 
+from .access_control import audit_access, build_access_scope
 from .bm25 import bm25_search
 from .config_versions import resolve_runtime_config
 from .index_lifecycle import index_health
@@ -15,9 +16,10 @@ from .compression import compress_context
 from .hybrid import rrf_fusion
 from .indexing import get_openai_client
 from .model_usage import elapsed_ms, extract_usage, record_model_call
-from .models import ChatMessage, ChatSession, ModelCallLog, RagTrace
+from .models import ChatMessage, ChatSession, Chunk, ModelCallLog, RagTrace
 from .query_rewrite import rewrite_query
 from .query_router import blocked_route_answer, classify_query_route
+from .redaction import redact_sensitive_text, sanitize_trace_results
 from .rerank import rerank_candidates
 from .retrieval import retrieve
 from .session_memory import (
@@ -72,12 +74,17 @@ def build_rag_options(raw_options: dict | None) -> dict:
 
 def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | None = None) -> tuple[str, list[dict], RagTrace]:
     pipeline_started_at = timezone.now()
+    scope = build_access_scope(session.owner, kb=session.kb)
+    if not scope.can_knowledge_base(session.kb, "query"):
+        audit_access(scope, "query", session.kb, False, "knowledge_base_denied")
+        raise PermissionError("Knowledge base access denied.")
+    audit_access(scope, "query", session.kb, True, "rag_pipeline_started")
     raw_options = rag_options or {}
     resolved_options, config_meta = resolve_runtime_config(
         session.kb, raw_options, override_enabled=bool(raw_options.get("override_enabled"))
     )
     rag_options = build_rag_options(resolved_options)
-    index_states = [index_health(document) for document in session.kb.documents.all()]
+    index_states = [index_health(document) for document in scope.filter_documents(session.kb.documents.all())]
     index_warnings = [reason for state in index_states for reason in state["reasons"]]
     conversation_context = recent_conversation_context(session, question)
     session_summary = get_session_summary_text(session)
@@ -109,13 +116,18 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
         )
         trace = RagTrace.objects.create(
             session=session,
+            organization=session.kb.organization,
+            access_scope_fingerprint=scope.fingerprint,
+            access_policy_ids=[session.kb.access_policy_id] if session.kb.access_policy_id else [],
+            authorization_decision={"allowed": True, "filtered_count": 0},
+            redaction_metadata={"prompt_persisted": False},
             question=question,
             rewritten_query=retrieval_query,
             query_intent=route_decision.query_intent,
             route_decision=route_decision.route_decision,
             route_reason=route_decision.route_reason,
             retrieval_mode=route_decision.route_decision,
-            final_prompt=prompt,
+            final_prompt="",
             settings={
                 **route_payload,
                 "query_router": route_payload,
@@ -124,8 +136,8 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
                 "index_warnings": index_warnings,
                 "query_rewrite_strategy": rewrite_result["rewrite_strategy"],
                 "conversation_rewrite_strategy": conversation_rewrite["conversation_rewrite_strategy"],
-                "conversation_context": conversation_context,
-                "session_summary": session_summary,
+                "conversation_context_message_count": len(conversation_context or []),
+                "session_summary_chars": len(session_summary or ""),
                 **summary_meta,
                 "original_query": question,
                 "standalone_query": standalone_question,
@@ -141,12 +153,12 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
     compression_strategy = rag_options.get("compression_strategy")
     compression_enabled = rag_options.get("compression_enabled")
     try:
-        vector_results = retrieve(session.kb, retrieval_query, top_k=rag_options["top_k"], context={"session": session})
+        vector_results = retrieve(session.kb, retrieval_query, top_k=rag_options["top_k"], context={"session": session}, scope=scope)
     except Exception as exc:
         message = f"向量检索连接失败，无法可靠回答知识库问题。请检查网络/API/Milvus 状态后重试。原始错误：{exc}"
         logger.exception("vector retrieval failed session=%s", session.id)
         raise RuntimeError(message) from exc
-    bm25_results = bm25_search(session.kb, retrieval_query, top_k=rag_options["bm25_top_k"])
+    bm25_results = bm25_search(session.kb, retrieval_query, top_k=rag_options["bm25_top_k"], scope=scope)
     hybrid_results = rrf_fusion(
         bm25_results,
         vector_results,
@@ -196,23 +208,30 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
         f"用户原始问题：{question}\n"
         f"用于检索的独立问题：{standalone_question}\n\n回答："
     )
+    source_chunk_ids = [item.get("chunk_id") for item in sources if item.get("chunk_id")]
+    used_policy_ids = sorted(set(scope.filter_chunks(Chunk.objects.filter(id__in=source_chunk_ids)).values_list("access_policy_id", flat=True)))
     trace = RagTrace.objects.create(
         session=session,
+        organization=session.kb.organization,
+        access_scope_fingerprint=scope.fingerprint,
+        access_policy_ids=used_policy_ids,
+        authorization_decision={"allowed": True, "filtered_count": 0},
+        redaction_metadata={"prompt_persisted": False, "retrieval_results_sanitized": True},
         question=question,
         rewritten_query=retrieval_query,
         query_intent=route_decision.query_intent,
         route_decision=route_decision.route_decision,
         route_reason=route_decision.route_reason,
         retrieval_mode="hybrid_rrf_rerank",
-        vector_results=vector_results,
-        bm25_results=bm25_results,
-        hybrid_results=hybrid_results,
-        rerank_results=rerank_results,
-        compression_results=sources,
+        vector_results=sanitize_trace_results(vector_results),
+        bm25_results=sanitize_trace_results(bm25_results),
+        hybrid_results=sanitize_trace_results(hybrid_results),
+        rerank_results=sanitize_trace_results(rerank_results),
+        compression_results=sanitize_trace_results(sources),
         compression_stats=compression_stats,
-        original_context=original_context,
-        compressed_context=compressed_context,
-        final_prompt=prompt,
+        original_context="",
+        compressed_context="",
+        final_prompt="",
         settings={
             **route_payload,
             "query_router": route_payload,
@@ -226,8 +245,8 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
             "rag_top_k": rag_options["top_k"],
             "query_rewrite_strategy": rewrite_result["rewrite_strategy"],
             "conversation_rewrite_strategy": conversation_rewrite["conversation_rewrite_strategy"],
-            "conversation_context": conversation_context,
-            "session_summary": session_summary,
+            "conversation_context_message_count": len(conversation_context or []),
+            "session_summary_chars": len(session_summary or ""),
             **summary_meta,
             "original_query": question,
             "standalone_query": standalone_question,
@@ -263,6 +282,25 @@ def build_rag_prompt(session: ChatSession, question: str, rag_options: dict | No
     return prompt, sources, trace
 
 
+def message_source_fields(sources: list[dict], scope) -> dict:
+    compact = []
+    chunk_ids = []
+    policy_ids = []
+    for source in sources or []:
+        chunk_id = int(source.get("chunk_id")) if source.get("chunk_id") else None
+        if chunk_id:
+            chunk_ids.append(chunk_id)
+        compact.append({key: source.get(key) for key in ("citation_id", "chunk_id", "score", "engine", "location") if source.get(key) is not None})
+    if chunk_ids:
+        policy_ids = list(scope.filter_chunks().filter(id__in=chunk_ids).values_list("access_policy_id", flat=True))
+    return {
+        "sources": compact,
+        "source_chunk_ids": sorted(set(chunk_ids)),
+        "source_policy_ids": sorted(set(policy_ids)),
+        "authorization_snapshot": {"organization_id": scope.organization.id, "scope_fingerprint": scope.fingerprint},
+    }
+
+
 def serialize_message(message: ChatMessage) -> dict:
     data = {
         "id": message.id,
@@ -292,9 +330,9 @@ def serialize_trace(trace: RagTrace) -> dict:
         "rerank_results": trace.rerank_results,
         "compression_results": trace.compression_results,
         "compression_stats": trace.compression_stats,
-        "original_context": trace.original_context,
-        "compressed_context": trace.compressed_context,
-        "final_prompt": trace.final_prompt,
+        "original_context": "",
+        "compressed_context": "",
+        "final_prompt": "",
         "settings": trace.settings,
         "created_at": trace.created_at.isoformat(),
     }
@@ -342,7 +380,7 @@ def answer_question(session: ChatSession, question: str, rag_options: dict | Non
         session=session,
         role="assistant",
         content=answer,
-        sources=json.loads(json.dumps(sources)),
+        **message_source_fields(sources, build_access_scope(session.owner, kb=session.kb)),
     )
     record_model_call(
         call_type="chat",
@@ -462,7 +500,7 @@ def stream_answer_events(session: ChatSession, question: str, rag_options: dict 
                 session=session,
                 role="assistant",
                 content=fallback_answer,
-                sources=json.loads(json.dumps(sources)),
+                **message_source_fields(sources, build_access_scope(session.owner, kb=session.kb)),
             )
             trace.message = message
             trace.settings = {
@@ -482,7 +520,7 @@ def stream_answer_events(session: ChatSession, question: str, rag_options: dict 
             session=session,
             role="assistant",
             content=fallback_answer,
-            sources=json.loads(json.dumps(sources)),
+            **message_source_fields(sources, build_access_scope(session.owner, kb=session.kb)),
         )
         record_model_call(
             call_type="chat",
@@ -507,7 +545,7 @@ def stream_answer_events(session: ChatSession, question: str, rag_options: dict 
         session=session,
         role="assistant",
         content="".join(answer_parts),
-        sources=json.loads(json.dumps(sources)),
+        **message_source_fields(sources, build_access_scope(session.owner, kb=session.kb)),
     )
     record_model_call(
         call_type="chat",

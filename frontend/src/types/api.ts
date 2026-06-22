@@ -1,9 +1,31 @@
 export type AnyRecord = Record<string, any>
 
+export interface OrganizationMembershipSummary {
+  id: number
+  status: string
+  department: string
+  clearance: string
+  roles: string[]
+  capabilities: string[]
+}
+
+export interface Organization {
+  id: number
+  name: string
+  slug: string
+  membership?: OrganizationMembershipSummary
+}
+
 export interface User {
   id: number
   username: string
+  organizations?: Organization[]
 }
+
+export interface Role { id: number; organization: number; name: string; slug: string; capabilities: string[]; is_system: boolean }
+export interface Membership { id: number; organization: number; user: number; user_name: string; status: string; department: string; clearance: string; roles: number[] }
+export interface AccessPolicy { id: number; organization: number; name: string; classification: string; visibility: string; allowed_roles: number[]; allowed_users: number[]; denied_users: number[]; allowed_departments: string[]; is_active: boolean; version: number }
+export interface AuthorizationAuditLog { id: number; organization: number; actor_name?: string; action: string; resource_type: string; resource_id: string; allowed: boolean; reason: string; created_at: string }
 
 export interface AuthTokens {
   access: string
@@ -14,6 +36,9 @@ export interface KnowledgeBase {
   id: number
   name: string
   description?: string
+  organization?: number
+  visibility?: string
+  access_policy?: number
 }
 
 export interface DocumentParseRun {
@@ -27,6 +52,8 @@ export interface DocumentParseRun {
   quality_metrics?: AnyRecord
   error_code?: string
   error_message?: string
+  access_policy?: number
+  inherits_policy?: boolean
 }
 
 export interface DocumentPage {

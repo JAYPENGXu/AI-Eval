@@ -288,7 +288,8 @@ EMBEDDING_MODEL=text-embedding-v4
 EMBEDDING_DIMENSIONS=1024
 DASHSCOPE_API_KEY=...
 DEEPSEEK_API_KEY=...
-MILVUS_URI=...
+VECTOR_STORE=milvus
+MILVUS_URI=http://127.0.0.1:19530
 MILVUS_COLLECTION=aiassistant_chunks
 CONVERSATION_CONTEXT_TURNS=6
 SESSION_SUMMARY_ENABLED=true
@@ -314,11 +315,19 @@ cd /AIAssistant/backend
 source venv/bin/activate
 pip install -r requirements.txt
 python manage.py migrate
+
+# 终端 1：由独立进程独占 Milvus Lite 数据目录
+milvus-lite server --data-dir ./vector_store/milvus_lite.db --host 127.0.0.1 --port 19530
+
+# 终端 2：Django
 python manage.py runserver 127.0.0.1:8010
 
-# 另开终端，确保 Redis 已启动
+# 终端 3：确保 Redis 已启动后运行统一 Worker
 celery -A assistant_backend worker --loglevel=INFO --concurrency=1 --queues=documents,evaluations,summaries,orchestration
 ```
+
+
+> `MILVUS_URI` 不要在 Django + Celery 架构下配置成本地文件路径。Milvus Lite 数据目录使用独占锁；应由 `milvus-lite server` 单独持有，Django 和 Worker 统一连接其 gRPC 地址。生产环境可将同一 URI 替换为 Milvus Standalone/Cluster。
 
 前端：
 
@@ -463,7 +472,9 @@ pytest rag/tests -q
 
 ```bash
 cd /AIAssistant/frontend
+npm run typecheck
 npm run build
+npm run e2e
 ```
 
 GitHub Actions（`.github/workflows/backend-tests.yml`）会在 `backend/**` 变更时自动运行上述后端检查与 pytest。
@@ -474,6 +485,63 @@ GitHub Actions（`.github/workflows/backend-tests.yml`）会在 `backend/**` 变
 cd /AIAssistant/backend
 source venv/bin/activate
 python manage.py eval_ragas --suite regression
+```
+
+
+## 多租户权限隔离
+
+系统使用 `Organization -> Membership -> Role` 建立租户边界，并使用 `AccessPolicy` 为 KnowledgeBase、Document 和 Chunk 提供统一 RBAC + ABAC 策略。固定密级为 `public / internal / confidential / restricted`，所有资源即使标记为 public 也仍要求同一 Organization 的 active Membership。
+
+授权顺序固定为：
+
+1. 校验同租户 active Membership，suspended 或跨租户立即拒绝。
+2. `denied_users` 优先于其它授权，包括 Owner/Admin。
+3. Owner/Admin 可绕过密级和 restricted 授权名单读取组织数据。
+4. 普通成员必须满足 clearance；organization 策略直接开放给满足密级的成员，restricted 策略还需命中 Role、User 或 Department。
+5. API、ORM、Vector、BM25、Citation、Trace、Agent Tool 和评测执行时都会重新鉴权，客户端提交的角色和 Policy ID 不作为可信授权依据。
+
+`build_access_scope(user, kb)` 是唯一权限入口。Milvus 查询表达式同时包含 `organization_id` 与 `access_policy_id`，命中后再使用 ORM Scope 二次校验；SQLite Vector fallback 和 BM25 使用同一过滤后的 Chunk QuerySet。权限撤销后，历史 Assistant Message 不再返回旧答案和 Citation，Trace 只输出 ID、分数、位置、Hash 和脱敏摘要。
+
+权限工作台支持：
+
+- Organization 切换与创建。
+- Membership 状态、部门、clearance 和 Role 管理。
+- 自定义 Role capabilities。
+- AccessPolicy 密级、范围、Role/Department 授权。
+- 授权允许/拒绝审计。
+- Document Policy 与 Chunk 显式覆盖 API。
+
+关键 API：
+
+```text
+/api/organizations/
+/api/organizations/{id}/memberships/
+/api/organizations/{id}/roles/
+/api/organizations/{id}/principals/
+/api/access-policies/
+/api/authorization-audit-logs/
+/api/documents/{id}/set-access-policy/
+/api/chunks/bulk-set-access-policy/
+```
+
+Policy 内容变更不需要重算 Embedding。Document/Chunk 改绑 Policy 时会更新 SQLite 和 Milvus 标量 metadata；已有向量可执行：
+
+```bash
+cd backend
+source venv/bin/activate
+python manage.py backfill_authorization_index
+```
+
+当前 schema 不兼容旧的无租户数据。清空旧业务数据后重新注册，系统会自动创建个人 Organization、Owner Membership、内置 Roles 和私有 Policy；已有账号也可以在“权限”工作台创建新 Organization。
+
+### 权限安全评测
+
+RAG Eval Case 支持 `case_type=security_acl`、`suite=security` 和 `unauthorized_recall_zero`。Security Suite 仅运行检索链，不生成答案，也不调用 LLM Judge；Vector、BM25、Hybrid、Rerank、Compression 任一阶段出现 forbidden Chunk/Document 或超出 expected authorized documents 即失败。
+
+```bash
+cd backend
+source venv/bin/activate
+python manage.py eval_ragas --kb-id <KB_ID> --suite security
 ```
 
 ## 当前项目价值

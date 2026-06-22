@@ -15,8 +15,10 @@ logger = logging.getLogger(__name__)
 class MilvusVectorStore:
     def __init__(self) -> None:
         self.collection_name = settings.MILVUS_COLLECTION
-        Path(settings.MILVUS_URI).parent.mkdir(parents=True, exist_ok=True)
-        self.client = MilvusClient(settings.MILVUS_URI)
+        uri = str(settings.MILVUS_URI)
+        if "://" not in uri:
+            Path(uri).parent.mkdir(parents=True, exist_ok=True)
+        self.client = MilvusClient(uri)
         self._loaded = False
 
     def ensure_collection(self) -> None:
@@ -64,6 +66,8 @@ class MilvusVectorStore:
                     "vector": chunk.embedding,
                     "chunk_id": int(chunk.id),
                     "kb_id": int(chunk.kb_id),
+                    "organization_id": int(chunk.kb.organization_id),
+                    "access_policy_id": int(chunk.access_policy_id),
                     "document_id": int(chunk.document_id),
                 }
             )
@@ -72,14 +76,14 @@ class MilvusVectorStore:
         self.client.upsert(collection_name=self.collection_name, data=rows)
         logger.info("milvus indexed chunks=%s collection=%s", len(rows), self.collection_name)
 
-    def search(self, kb: KnowledgeBase, query_embedding: list[float], top_k: int) -> list[dict]:
+    def search(self, kb: KnowledgeBase, query_embedding: list[float], top_k: int, scope) -> list[dict]:
         self.ensure_collection()
         results = self.client.search(
             collection_name=self.collection_name,
             data=[query_embedding],
             limit=top_k,
-            filter=f"kb_id == {int(kb.id)}",
-            output_fields=["chunk_id", "kb_id", "document_id"],
+            filter=scope.milvus_filter_expression(kb.id),
+            output_fields=["chunk_id", "kb_id", "document_id", "organization_id", "access_policy_id"],
         )
         hits = []
         for rank, hit in enumerate(results[0] if results else [], start=1):

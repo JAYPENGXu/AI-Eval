@@ -26,6 +26,7 @@ from .models import (
     RagConfigVersion,
     RagTrace,
     RagUserFeedback,
+    AccessPolicy, Membership, Organization, Role, AuthorizationAuditLog, ROLE_CAPABILITIES,
 )
 
 
@@ -37,7 +38,10 @@ class RegisterSerializer(serializers.ModelSerializer):
         fields = ["id", "username", "password"]
 
     def create(self, validated_data):
-        return User.objects.create_user(**validated_data)
+        from .tenancy import bootstrap_user_organization
+        user = User.objects.create_user(**validated_data)
+        bootstrap_user_organization(user)
+        return user
 
 
 class KnowledgeBaseSerializer(serializers.ModelSerializer):
@@ -45,8 +49,15 @@ class KnowledgeBaseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = KnowledgeBase
-        fields = ["id", "name", "description", "active_config_version", "active_config", "created_at", "updated_at"]
+        fields = ["id", "organization", "name", "description", "visibility", "access_policy", "active_config_version", "active_config", "created_at", "updated_at"]
         read_only_fields = ["active_config_version", "active_config"]
+
+    def validate(self, attrs):
+        organization = attrs.get("organization") or getattr(self.instance, "organization", None)
+        policy = attrs.get("access_policy") or getattr(self.instance, "access_policy", None)
+        if organization and policy and policy.organization_id != organization.id:
+            raise serializers.ValidationError({"access_policy": "Policy must belong to the knowledge base organization."})
+        return attrs
 
     def get_active_config(self, obj):
         version = obj.active_config_version
@@ -70,7 +81,9 @@ class OwnedKnowledgeBaseRelatedField(serializers.PrimaryKeyRelatedField):
     def get_queryset(self):
         request = self.context.get("request")
         if request and request.user.is_authenticated:
-            return KnowledgeBase.objects.filter(owner=request.user)
+            from .access_control import filter_knowledge_bases_for_user
+            capability = self.context.get("kb_capability", "query")
+            return filter_knowledge_bases_for_user(request.user, capability=capability)
         return KnowledgeBase.objects.none()
 
 
@@ -110,7 +123,7 @@ class DocumentSerializer(serializers.ModelSerializer):
         fields = [
             "id", "kb", "filename", "file", "file_type", "mime_type", "size_bytes", "sha256",
             "status", "chunk_method", "chunk_options", "chunk_count", "latest_parse",
-            "index_signature", "index_manifest", "indexed_at", "error_message", "created_at", "updated_at",
+            "access_policy", "inherits_policy", "index_signature", "index_manifest", "indexed_at", "error_message", "created_at", "updated_at",
         ]
         read_only_fields = [
             "filename", "file_type", "mime_type", "size_bytes", "sha256", "status", "error_message"
@@ -131,7 +144,7 @@ class DocumentSerializer(serializers.ModelSerializer):
 class ChunkSerializer(serializers.ModelSerializer):
     class Meta:
         model = Chunk
-        fields = ["id", "index", "content", "token_count", "metadata"]
+        fields = ["id", "index", "content", "token_count", "metadata", "access_policy", "inherits_policy"]
 
 
 class ChatSessionSummarySerializer(serializers.ModelSerializer):
@@ -178,6 +191,34 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         model = ChatMessage
         fields = ["id", "role", "content", "sources", "trace", "feedback", "created_at"]
 
+    def to_representation(self, obj):
+        data = super().to_representation(obj)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        source_ids = {int(value) for value in (obj.source_chunk_ids or []) if str(value).isdigit()}
+        if not user or not user.is_authenticated or not source_ids:
+            data["sources"] = obj.sources or []
+            return data
+        from .access_control import build_access_scope
+        scope = build_access_scope(user, kb=obj.session.kb)
+        chunks = scope.filter_chunks(Chunk.objects.filter(id__in=source_ids)).select_related("document")
+        by_id = {chunk.id: chunk for chunk in chunks}
+        if set(by_id) != source_ids:
+            data["content"] = "内容因权限变更不可用。"
+            data["sources"] = []
+            data["authorization"] = {"available": False, "reason": "permission_changed"}
+            return data
+        sources = []
+        compact = obj.sources or []
+        for item in compact:
+            chunk = by_id.get(int(item.get("chunk_id") or 0))
+            if not chunk:
+                continue
+            sources.append({**item, "document": chunk.document.filename, "content": chunk.content[:220]})
+        data["sources"] = sources
+        data["authorization"] = {"available": True, "filtered_count": 0}
+        return data
+
     def get_feedback(self, obj):
         request = self.context.get("request")
         user = getattr(request, "user", None)
@@ -214,9 +255,9 @@ class ChatMessageSerializer(serializers.ModelSerializer):
             "rerank_results": trace.rerank_results,
             "compression_results": trace.compression_results,
             "compression_stats": trace.compression_stats,
-            "original_context": trace.original_context,
-            "compressed_context": trace.compressed_context,
-            "final_prompt": trace.final_prompt,
+            "original_context": "",
+            "compressed_context": "",
+            "final_prompt": "",
             "settings": trace.settings,
             "created_at": trace.created_at.isoformat(),
         }
@@ -250,7 +291,37 @@ class RagUserFeedbackSerializer(serializers.ModelSerializer):
         return RagAgentActionSerializer(obj.created_action).data
 
 
-class RagTraceListSerializer(serializers.ModelSerializer):
+class AuthorizedTraceRepresentationMixin:
+    sensitive_fields = ("vector_results", "bm25_results", "hybrid_results", "rerank_results", "compression_results", "original_context", "compressed_context", "final_prompt")
+
+    def to_representation(self, obj):
+        data = super().to_representation(obj)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        from .access_control import build_access_scope
+        from .redaction import sanitize_trace_results
+        scope = build_access_scope(user, kb=obj.session.kb) if user and user.is_authenticated else None
+        policy_ids = {int(value) for value in (obj.access_policy_ids or []) if str(value).isdigit()}
+        available = bool(scope and scope.can_knowledge_base(obj.session.kb, "view_traces") and policy_ids.issubset(scope.allowed_policy_ids))
+        if not available:
+            data["message_content"] = "内容因权限变更不可用。"
+            for field in self.sensitive_fields:
+                if field in data: data[field] = [] if field.endswith("results") else ""
+            data["authorization"] = {"available": False, "reason": "permission_changed"}
+            return data
+        for field in ("vector_results", "bm25_results", "hybrid_results", "rerank_results", "compression_results"):
+            if field in data: data[field] = sanitize_trace_results(data[field])
+        for field in ("original_context", "compressed_context", "final_prompt"):
+            if field in data: data[field] = ""
+        settings_data = dict(data.get("settings") or {})
+        for key in ("conversation_context", "session_summary", "blocked_answer"):
+            settings_data.pop(key, None)
+        data["settings"] = settings_data
+        data["authorization"] = {"available": True, "scope_fingerprint": scope.fingerprint}
+        return data
+
+
+class RagTraceListSerializer(AuthorizedTraceRepresentationMixin, serializers.ModelSerializer):
     session_title = serializers.CharField(source="session.title", read_only=True)
     kb = serializers.IntegerField(source="session.kb_id", read_only=True)
     kb_name = serializers.CharField(source="session.kb.name", read_only=True)
@@ -277,7 +348,7 @@ class RagTraceListSerializer(serializers.ModelSerializer):
         ]
 
 
-class RagTraceDetailSerializer(serializers.ModelSerializer):
+class RagTraceDetailSerializer(AuthorizedTraceRepresentationMixin, serializers.ModelSerializer):
     session_title = serializers.CharField(source="session.title", read_only=True)
     kb = serializers.IntegerField(source="session.kb_id", read_only=True)
     kb_name = serializers.CharField(source="session.kb.name", read_only=True)
@@ -357,6 +428,10 @@ class RagBenchmarkCaseSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "kb",
+            "principal_membership",
+            "forbidden_document_ids",
+            "forbidden_chunk_ids",
+            "expected_authorized_document_ids",
             "case_id",
             "case_type",
             "question",
@@ -448,6 +523,26 @@ class RagBenchmarkCaseSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError("reference is required.")
         return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        kb = attrs.get("kb") or getattr(self.instance, "kb", None)
+        principal = attrs.get("principal_membership") or getattr(self.instance, "principal_membership", None)
+        suite = attrs.get("suite") or getattr(self.instance, "suite", "")
+        if principal and kb and principal.organization_id != kb.organization_id:
+            raise serializers.ValidationError({"principal_membership": "Principal must belong to the knowledge base organization."})
+        if suite == "security" and not principal:
+            raise serializers.ValidationError({"principal_membership": "Security cases require a principal membership."})
+        if kb:
+            valid_documents = set(Document.objects.filter(kb=kb).values_list("id", flat=True))
+            valid_chunks = set(Chunk.objects.filter(kb=kb).values_list("id", flat=True))
+            supplied_documents = {int(value) for field in ("forbidden_document_ids", "expected_authorized_document_ids") for value in (attrs.get(field, getattr(self.instance, field, []) if self.instance else []) or [])}
+            supplied_chunks = {int(value) for value in (attrs.get("forbidden_chunk_ids", getattr(self.instance, "forbidden_chunk_ids", []) if self.instance else []) or [])}
+            if not supplied_documents.issubset(valid_documents):
+                raise serializers.ValidationError("Security document IDs must belong to the selected knowledge base.")
+            if not supplied_chunks.issubset(valid_chunks):
+                raise serializers.ValidationError("Security chunk IDs must belong to the selected knowledge base.")
+        return attrs
 
 
 class RagEvalCaseResultSerializer(serializers.ModelSerializer):

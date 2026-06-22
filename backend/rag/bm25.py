@@ -6,6 +6,7 @@ from collections import Counter
 
 from django.conf import settings
 
+from .access_control import build_access_scope
 from .models import Chunk, KnowledgeBase
 from .source_metadata import source_location
 
@@ -17,13 +18,16 @@ def tokenize(text: str) -> list[str]:
     return [token.lower() for token in TOKEN_PATTERN.findall(text or "")]
 
 
-def bm25_search(kb: KnowledgeBase, question: str, top_k: int | None = None) -> list[dict]:
+def bm25_search(kb: KnowledgeBase, question: str, top_k: int | None = None, scope=None, user=None) -> list[dict]:
+    scope = scope or build_access_scope(user or kb.owner, kb=kb)
+    if not scope.can_knowledge_base(kb, "query"):
+        raise PermissionError("Knowledge base access denied.")
     limit = top_k or settings.BM25_TOP_K
     query_tokens = tokenize(question)
     if not query_tokens:
         return []
 
-    chunks = list(Chunk.objects.filter(kb=kb).select_related("document").order_by("id"))
+    chunks = list(scope.filter_chunks(Chunk.objects.filter(kb=kb)).select_related("document").order_by("id"))
     if not chunks:
         return []
 

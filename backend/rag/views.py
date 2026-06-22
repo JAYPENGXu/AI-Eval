@@ -14,8 +14,11 @@ from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
+from .access_control import (AccessDenied, audit_access, build_access_scope, filter_documents_for_user,
+    filter_knowledge_bases_for_user, filter_traces_for_user, require_capability)
 from .agent.actions import execute_agent_action
 from .agent.services import get_ragops_agent_state, resume_ragops_agent, run_ragops_agent
 from .case_factory import create_regression_case_from_eval_case, create_regression_case_from_trace, create_regression_case_from_user_feedback
@@ -294,7 +297,9 @@ class RegisterView(generics.CreateAPIView):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def me(request):
-    return Response({"id": request.user.id, "username": request.user.username})
+    from .permission_serializers import OrganizationSerializer
+    organizations = request.user.organization_memberships.filter(status="active").select_related("organization")
+    return Response({"id": request.user.id, "username": request.user.username, "organizations": OrganizationSerializer([item.organization for item in organizations], many=True, context={"request": request}).data})
 
 
 @api_view(["GET"])
@@ -306,70 +311,63 @@ def chunk_methods(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def reset_workspace(request):
-    documents = list(Document.objects.filter(kb__owner=request.user).only("id", "file"))
+    organization_id = request.data.get("organization")
+    membership_qs = request.user.organization_memberships.filter(status="active").select_related("organization").prefetch_related("roles")
+    membership = membership_qs.filter(organization_id=organization_id).first() if organization_id else membership_qs.order_by("id").first()
+    if not membership:
+        return Response({"detail": "Organization not found."}, status=status.HTTP_404_NOT_FOUND)
+    organization = membership.organization
+    is_owner = membership.roles.filter(slug="owner").exists()
+    is_shared = organization.memberships.filter(status="active").count() > 1
+    if not is_owner:
+        return Response({"detail": "Only an Organization Owner can reset a workspace."}, status=status.HTTP_403_FORBIDDEN)
+    if is_shared and request.data.get("confirm_shared") != organization.slug:
+        return Response({"detail": "Shared Organization reset requires its exact slug as confirm_shared."}, status=status.HTTP_409_CONFLICT)
+
+    scope = require_capability(request.user, "manage_organization", organization=organization)
+    kb_queryset = KnowledgeBase.objects.filter(organization=organization)
+    documents = list(Document.objects.filter(kb__organization=organization).only("id", "file"))
     document_ids = [document.id for document in documents]
     deleted_files = 0
-    parse_cases = list(DocumentParseBenchmarkCase.objects.filter(owner=request.user).only("id", "file"))
-
+    parse_cases = list(DocumentParseBenchmarkCase.objects.filter(owner=request.user).only("id", "file")) if not is_shared else []
     get_vector_store().delete_documents(document_ids)
-
-    for document in documents:
-        if document.file:
+    for item in [*documents, *parse_cases]:
+        if item.file:
             try:
-                document.file.delete(save=False)
-                deleted_files += 1
-            except FileNotFoundError:
-                pass
-
-    for case in parse_cases:
-        if case.file:
-            try:
-                case.file.delete(save=False)
-                deleted_files += 1
+                item.file.delete(save=False); deleted_files += 1
             except FileNotFoundError:
                 pass
 
     with transaction.atomic():
         parse_case_count = len(parse_cases)
-        parse_eval_run_count = DocumentParseEvalRun.objects.filter(owner=request.user).count()
-        DocumentParseEvalRun.objects.filter(owner=request.user).delete()
-        DocumentParseBenchmarkCase.objects.filter(owner=request.user).delete()
-        message_count = ChatMessage.objects.filter(session__owner=request.user).count()
-        session_count = ChatSession.objects.filter(owner=request.user).count()
-        chunk_count = Chunk.objects.filter(kb__owner=request.user).count()
-        benchmark_case_count = RagBenchmarkCase.objects.filter(kb__owner=request.user).count()
-        eval_run_count = RagEvalRun.objects.filter(kb__owner=request.user).count()
-        eval_case_count = RagEvalCaseResult.objects.filter(run__kb__owner=request.user).count()
-        model_call_count = ModelCallLog.objects.filter(owner=request.user).count()
-        agent_action_count = RagAgentAction.objects.filter(owner=request.user).count()
-        ModelCallLog.objects.filter(owner=request.user).delete()
-        RagAgentAction.objects.filter(owner=request.user).delete()
-        document_count = len(documents)
-        kb_count = KnowledgeBase.objects.filter(owner=request.user).count()
-        KnowledgeBase.objects.filter(owner=request.user).delete()
-
-    return Response(
-        {
-            "status": "reset",
-            "deleted": {
-                "knowledge_bases": kb_count,
-                "documents": document_count,
-                "chunks": chunk_count,
-                "chat_sessions": session_count,
-                "chat_messages": message_count,
-                "rag_benchmark_cases": benchmark_case_count,
-                "rag_eval_runs": eval_run_count,
-                "rag_eval_case_results": eval_case_count,
-                "document_parse_cases": parse_case_count,
-                "document_parse_eval_runs": parse_eval_run_count,
-                "model_call_logs": model_call_count,
-                "rag_agent_actions": agent_action_count,
-                "uploaded_files": deleted_files,
-                "vector_documents": len(document_ids),
-            },
-        }
-    )
-
+        parse_eval_run_count = DocumentParseEvalRun.objects.filter(owner=request.user).count() if not is_shared else 0
+        if not is_shared:
+            DocumentParseEvalRun.objects.filter(owner=request.user).delete()
+            DocumentParseBenchmarkCase.objects.filter(owner=request.user).delete()
+        sessions = ChatSession.objects.filter(kb__organization=organization)
+        message_count = ChatMessage.objects.filter(session__in=sessions).count()
+        session_count = sessions.count()
+        chunk_count = Chunk.objects.filter(kb__organization=organization).count()
+        benchmark_case_count = RagBenchmarkCase.objects.filter(kb__organization=organization).count()
+        eval_runs = RagEvalRun.objects.filter(kb__organization=organization)
+        eval_run_count = eval_runs.count()
+        eval_case_count = RagEvalCaseResult.objects.filter(run__in=eval_runs).count()
+        model_logs = ModelCallLog.objects.filter(kb__organization=organization)
+        actions = RagAgentAction.objects.filter(kb__organization=organization)
+        model_call_count = model_logs.count(); agent_action_count = actions.count()
+        model_logs.delete(); actions.delete()
+        document_count = len(documents); kb_count = kb_queryset.count()
+        kb_queryset.delete()
+    audit_access(scope, "reset_workspace", organization, True, "shared" if is_shared else "personal", {"knowledge_bases": kb_count})
+    return Response({"status": "reset", "organization": organization.id, "deleted": {
+        "knowledge_bases": kb_count, "documents": document_count, "chunks": chunk_count,
+        "chat_sessions": session_count, "chat_messages": message_count,
+        "rag_benchmark_cases": benchmark_case_count, "rag_eval_runs": eval_run_count,
+        "rag_eval_case_results": eval_case_count, "document_parse_cases": parse_case_count,
+        "document_parse_eval_runs": parse_eval_run_count, "model_call_logs": model_call_count,
+        "rag_agent_actions": agent_action_count, "uploaded_files": deleted_files,
+        "vector_documents": len(document_ids),
+    }})
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -394,23 +392,52 @@ class KnowledgeBaseViewSet(viewsets.ModelViewSet):
     serializer_class = KnowledgeBaseSerializer
 
     def get_queryset(self):
-        return KnowledgeBase.objects.filter(owner=self.request.user).order_by("-created_at")
+        return filter_knowledge_bases_for_user(self.request.user).order_by("-created_at")
 
     def perform_create(self, serializer):
-        kb = serializer.save(owner=self.request.user)
+        organization = serializer.validated_data.get("organization")
+        if not organization:
+            membership = self.request.user.organization_memberships.filter(status="active").select_related("organization").first()
+            if not membership:
+                raise PermissionDenied("Active organization membership is required.")
+            organization = membership.organization
+        scope = require_capability(self.request.user, "manage_knowledge_bases", organization=organization)
+        policy = serializer.validated_data.get("access_policy")
+        if not policy:
+            policy = organization.access_policies.filter(is_active=True).order_by("id").first()
+        if not policy or policy.organization_id != organization.id:
+            raise PermissionDenied("A policy from the current organization is required.")
+        kb = serializer.save(owner=self.request.user, organization=organization, access_policy=policy)
+        audit_access(scope, "manage_knowledge_bases", kb, True, "created")
         from .config_versions import ensure_initial_config
         ensure_initial_config(kb, self.request.user)
+
+    def perform_update(self, serializer):
+        scope = require_capability(self.request.user, "manage_knowledge_bases", kb=serializer.instance)
+        organization = serializer.validated_data.get("organization", serializer.instance.organization)
+        policy = serializer.validated_data.get("access_policy", serializer.instance.access_policy)
+        if organization.id != serializer.instance.organization_id or not policy or policy.organization_id != organization.id:
+            raise PermissionDenied("Knowledge base organization is immutable and policy must belong to it.")
+        kb = serializer.save()
+        audit_access(scope, "manage_knowledge_bases", kb, True, "updated")
+
+    def perform_destroy(self, instance):
+        scope = require_capability(self.request.user, "manage_knowledge_bases", kb=instance)
+        audit_access(scope, "manage_knowledge_bases", instance, True, "deleted")
+        instance.delete()
 
     @action(detail=True, methods=["get"], url_path="index-health")
     def index_health_view(self, request, pk=None):
         kb = self.get_object()
-        documents = [index_health(document) for document in kb.documents.all()]
+        scope = build_access_scope(request.user, kb=kb)
+        documents = [index_health(document) for document in scope.filter_documents(kb.documents.all())]
         return Response({"kb": kb.id, "stale_count": sum(item["stale"] for item in documents), "critical": any(item["critical"] for item in documents), "documents": documents})
 
     @action(detail=True, methods=["post"], url_path="reindex-stale")
     def reindex_stale(self, request, pk=None):
         kb = self.get_object(); runs = []
-        for document in kb.documents.all():
+        scope = require_capability(request.user, "manage_documents", kb=kb)
+        for document in scope.filter_documents(kb.documents.all(), capability="manage_documents"):
             if index_health(document)["stale"] and document.parse_runs.filter(status="completed").exists():
                 runs.append(create_index_run(document, document.chunk_method, document.chunk_options))
         return Response(DocumentIndexRunSerializer(runs, many=True).data, status=status.HTTP_202_ACCEPTED)
@@ -420,14 +447,22 @@ class DocumentViewSet(viewsets.ModelViewSet):
     serializer_class = DocumentSerializer
 
     def get_queryset(self):
-        return Document.objects.filter(kb__owner=self.request.user).prefetch_related("parse_runs").order_by("-created_at")
+        return filter_documents_for_user(self.request.user).prefetch_related("parse_runs").order_by("-created_at")
 
     def perform_create(self, serializer):
+        kb = serializer.validated_data["kb"]
+        scope = require_capability(self.request.user, "manage_documents", kb=kb)
+        if not scope.can_knowledge_base(kb, "manage_documents"):
+            raise PermissionDenied("Permission denied.")
         uploaded = self.request.FILES.get("file")
         metadata = getattr(serializer, "_validated_file_metadata", {})
         filename = metadata.get("filename") or (uploaded.name if uploaded else "")
         file_type = Path(filename).suffix.lower().lstrip(".")
+        policy = serializer.validated_data.get("access_policy") or kb.access_policy
+        if not policy or policy.organization_id != kb.organization_id:
+            raise PermissionDenied("A policy from the knowledge base organization is required.")
         document = serializer.save(
+            access_policy=policy, inherits_policy="access_policy" not in serializer.validated_data,
             filename=filename,
             file_type=file_type,
             mime_type=metadata.get("mime_type", ""),
@@ -437,9 +472,46 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
         create_parse_run(document)
 
+    def perform_update(self, serializer):
+        document = serializer.instance
+        scope = require_capability(self.request.user, "manage_documents", kb=document.kb)
+        if "kb" in serializer.validated_data and serializer.validated_data["kb"].id != document.kb_id:
+            raise PermissionDenied("Moving a document between knowledge bases is not supported.")
+        policy = serializer.validated_data.get("access_policy", document.access_policy)
+        if not policy or policy.organization_id != document.kb.organization_id:
+            raise PermissionDenied("Policy must belong to the knowledge base organization.")
+        serializer.save()
+        audit_access(scope, "manage_documents", document, True, "updated")
+
+    def perform_destroy(self, instance):
+        scope = require_capability(self.request.user, "manage_documents", kb=instance.kb)
+        audit_access(scope, "manage_documents", instance, True, "deleted")
+        instance.delete()
+
+    @action(detail=True, methods=["post"], url_path="set-access-policy")
+    def set_access_policy(self, request, pk=None):
+        document = self.get_object()
+        scope = require_capability(request.user, "manage_documents", kb=document.kb)
+        policy = document.kb.organization.access_policies.filter(pk=request.data.get("access_policy"), is_active=True).first()
+        if not policy:
+            return Response({"detail": "Access policy not found."}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            document.access_policy = policy
+            document.inherits_policy = bool(request.data.get("inherits_policy", False))
+            document.save(update_fields=["access_policy", "inherits_policy", "updated_at"])
+            updated = document.chunks.filter(inherits_policy=True).update(access_policy=policy)
+        try:
+            get_vector_store().index_chunks(list(document.chunks.filter(inherits_policy=True).select_related("kb")))
+        except Exception:
+            logger.warning("vector policy metadata sync deferred document=%s", document.id)
+        audit_access(scope, "manage_documents", document, True, "document_policy_updated", {"inherited_chunks": updated})
+        return Response({"document": DocumentSerializer(document, context={"request": request}).data, "updated_chunks": updated})
+
     @action(detail=True, methods=["post"], url_path="parse")
     def parse_document(self, request, pk=None):
-        run = create_parse_run(self.get_object())
+        document = self.get_object()
+        require_capability(request.user, "manage_documents", kb=document.kb)
+        run = create_parse_run(document)
         run.refresh_from_db()
         if run.status == "failed" and run.error_code == "queue_unavailable":
             return Response(DocumentParseRunSerializer(run).data, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -479,6 +551,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="accept-parse")
     def accept_parse(self, request, pk=None):
         document = self.get_object()
+        require_capability(request.user, "manage_documents", kb=document.kb)
         run_id = request.data.get("parse_run_id")
         runs = document.parse_runs.filter(status="needs_review")
         if run_id:
@@ -512,6 +585,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def index(self, request, pk=None):
         document = self.get_object()
+        require_capability(request.user, "manage_documents", kb=document.kb)
         try:
             run = create_index_run(
                 document, request.data.get("chunk_method") or "sentence",
@@ -532,7 +606,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def chunks(self, request, pk=None):
         document = self.get_object()
-        queryset = Chunk.objects.filter(document=document)
+        scope = build_access_scope(request.user, kb=document.kb)
+        queryset = scope.filter_chunks(Chunk.objects.filter(document=document))
         return Response(ChunkSerializer(queryset, many=True).data)
 
 
@@ -540,7 +615,8 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
     serializer_class = ChatSessionSerializer
 
     def get_queryset(self):
-        queryset = ChatSession.objects.filter(owner=self.request.user)
+        allowed_kbs = filter_knowledge_bases_for_user(self.request.user).values("id")
+        queryset = ChatSession.objects.filter(owner=self.request.user, kb_id__in=allowed_kbs)
         kb_id = self.request.query_params.get("kb")
         if kb_id:
             queryset = queryset.filter(kb_id=kb_id)
@@ -553,7 +629,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
     def messages(self, request, pk=None):
         session = self.get_object()
         if request.method == "GET":
-            return Response(ChatMessageSerializer(session.messages.all(), many=True).data)
+            return Response(ChatMessageSerializer(session.messages.all(), many=True, context={"request": request}).data)
 
         question = (request.data.get("content") or "").strip()
         if not question:
@@ -562,7 +638,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         ChatMessage.objects.create(session=session, role="user", content=question)
         answer = answer_question(session, question, rag_options)
         session.save(update_fields=["updated_at"])
-        return Response(ChatMessageSerializer(answer).data)
+        return Response(ChatMessageSerializer(answer, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path="stream")
     def stream(self, request, pk=None):
@@ -611,7 +687,7 @@ class RagTraceViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         queryset = (
-            RagTrace.objects.filter(session__owner=self.request.user)
+            filter_traces_for_user(self.request.user, RagTrace.objects.all())
             .select_related("session", "session__kb", "message")
             .order_by("-created_at", "-id")
         )
@@ -883,7 +959,8 @@ class RagBenchmarkCaseViewSet(viewsets.ModelViewSet):
     serializer_class = RagBenchmarkCaseSerializer
 
     def get_queryset(self):
-        queryset = RagBenchmarkCase.objects.filter(kb__owner=self.request.user).order_by("case_id", "id")
+        kb_ids = filter_knowledge_bases_for_user(self.request.user, capability="run_evaluations").values("id")
+        queryset = RagBenchmarkCase.objects.filter(kb_id__in=kb_ids).order_by("case_id", "id")
         kb_id = self.request.query_params.get("kb")
         enabled = self.request.query_params.get("enabled")
         suite = self.request.query_params.get("suite")
@@ -901,10 +978,17 @@ class RagBenchmarkCaseViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
+        kb = serializer.validated_data["kb"]
+        require_capability(self.request.user, "run_evaluations", kb=kb)
         serializer.save()
 
     def perform_update(self, serializer):
+        require_capability(self.request.user, "run_evaluations", kb=serializer.instance.kb)
         serializer.save()
+
+    def perform_destroy(self, instance):
+        require_capability(self.request.user, "run_evaluations", kb=instance.kb)
+        instance.delete()
 
 
     @action(detail=False, methods=["post"], url_path="from-trace")
@@ -938,7 +1022,7 @@ class RagBenchmarkCaseViewSet(viewsets.ModelViewSet):
         kb_id = request.data.get("kb") or request.data.get("kb_id")
         if not kb_id:
             return Response({"detail": "kb is required"}, status=status.HTTP_400_BAD_REQUEST)
-        kb = KnowledgeBase.objects.filter(id=kb_id, owner=request.user).first()
+        kb = filter_knowledge_bases_for_user(request.user, capability="run_evaluations").filter(id=kb_id).first()
         if not kb:
             return Response({"detail": "Knowledge base not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -995,7 +1079,7 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         queryset = (
-            RagEvalRun.objects.filter(kb__owner=self.request.user)
+            RagEvalRun.objects.filter(kb_id__in=filter_knowledge_bases_for_user(self.request.user, capability="run_evaluations").values("id"))
             .select_related("kb")
             .prefetch_related("case_results")
             .order_by("-created_at", "-id")
@@ -1010,10 +1094,10 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
 
     def list(self, request, *args, **kwargs):
         kb_id = request.query_params.get("kb")
-        reconcile_stale_eval_runs(
-            owner=request.user,
-            kb_id=int(kb_id) if kb_id else None,
-        )
+        allowed_ids = filter_knowledge_bases_for_user(request.user, capability="run_evaluations").values_list("id", flat=True)
+        target_ids = [int(kb_id)] if kb_id and int(kb_id) in set(allowed_ids) else list(allowed_ids)
+        for target_id in target_ids:
+            reconcile_stale_eval_runs(kb_id=target_id)
         return super().list(request, *args, **kwargs)
 
     def retrieve(self, request, *args, **kwargs):
@@ -1026,7 +1110,7 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
         kb_id = request.data.get("kb") or request.data.get("kb_id")
         if not kb_id:
             return Response({"detail": "kb is required"}, status=status.HTTP_400_BAD_REQUEST)
-        kb = KnowledgeBase.objects.filter(id=kb_id, owner=request.user).first()
+        kb = filter_knowledge_bases_for_user(request.user, capability="run_evaluations").filter(id=kb_id).first()
         if not kb:
             return Response({"detail": "Knowledge base not found."}, status=status.HTTP_404_NOT_FOUND)
         if not Chunk.objects.filter(kb=kb).exists():
@@ -1074,7 +1158,7 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
             if not baseline_run:
                 return Response({"detail": "Baseline run not found in this knowledge base."}, status=status.HTTP_404_NOT_FOUND)
 
-        reconcile_stale_eval_runs(owner=request.user, kb_id=kb.id)
+        reconcile_stale_eval_runs(kb_id=kb.id)
 
         eval_run = RagEvalRun.objects.create(
             kb=kb,
@@ -1146,7 +1230,7 @@ class RagConfigVersionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = RagConfigVersionSerializer
 
     def get_queryset(self):
-        queryset = RagConfigVersion.objects.filter(kb__owner=self.request.user)
+        queryset = RagConfigVersion.objects.filter(kb_id__in=filter_knowledge_bases_for_user(self.request.user, capability="use_agent").values("id"))
         kb = self.request.query_params.get("kb")
         return queryset.filter(kb_id=kb) if kb else queryset
 
@@ -1183,6 +1267,6 @@ class RagConfigVersionViewSet(viewsets.ReadOnlyModelViewSet):
 class RagConfigDeploymentViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = RagConfigDeploymentSerializer
     def get_queryset(self):
-        queryset = RagConfigDeployment.objects.filter(kb__owner=self.request.user).select_related("previous_version","target_version")
+        queryset = RagConfigDeployment.objects.filter(kb_id__in=filter_knowledge_bases_for_user(self.request.user, capability="use_agent").values("id")).select_related("previous_version","target_version")
         kb = self.request.query_params.get("kb")
         return queryset.filter(kb_id=kb) if kb else queryset

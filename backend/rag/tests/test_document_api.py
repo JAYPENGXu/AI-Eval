@@ -8,12 +8,14 @@ from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient
 
+from rag.tenancy import bootstrap_user_organization
 from rag.models import Document, DocumentPage, DocumentParseRun, KnowledgeBase
 
 
 @pytest.fixture
 def api_user():
     user = User.objects.create_user(username="document-api-user", password="secret")
+    bootstrap_user_organization(user)
     client = APIClient()
     client.force_authenticate(user)
     return user, client
@@ -23,7 +25,9 @@ def api_user():
 def test_upload_validates_and_queues_parse_run(tmp_path, settings, api_user):
     settings.MEDIA_ROOT = tmp_path / "media"
     user, client = api_user
-    kb = KnowledgeBase.objects.create(owner=user, name="KB")
+    organization = user.organization_memberships.get(status="active").organization
+    policy = organization.access_policies.first()
+    kb = KnowledgeBase.objects.create(owner=user, organization=organization, access_policy=policy, visibility="private", name="KB")
     uploaded = SimpleUploadedFile(
         "guide.md",
         "# 标题\n\n这是用于解析层 API 测试的正文内容。".encode(),
@@ -47,7 +51,9 @@ def test_upload_validates_and_queues_parse_run(tmp_path, settings, api_user):
 def test_upload_rejects_extension_signature_mismatch(tmp_path, settings, api_user):
     settings.MEDIA_ROOT = tmp_path / "media"
     user, client = api_user
-    kb = KnowledgeBase.objects.create(owner=user, name="KB")
+    organization = user.organization_memberships.get(status="active").organization
+    policy = organization.access_policies.first()
+    kb = KnowledgeBase.objects.create(owner=user, organization=organization, access_policy=policy, visibility="private", name="KB")
     uploaded = SimpleUploadedFile("fake.pdf", b"plain text", content_type="application/pdf")
 
     response = client.post("/api/documents/", {"kb": kb.id, "file": uploaded}, format="multipart")
@@ -60,9 +66,12 @@ def test_upload_rejects_extension_signature_mismatch(tmp_path, settings, api_use
 def test_accept_parse_unlocks_preview_and_chunking(tmp_path, settings, api_user):
     settings.MEDIA_ROOT = tmp_path / "media"
     user, client = api_user
-    kb = KnowledgeBase.objects.create(owner=user, name="KB")
+    organization = user.organization_memberships.get(status="active").organization
+    policy = organization.access_policies.first()
+    kb = KnowledgeBase.objects.create(owner=user, organization=organization, access_policy=policy, visibility="private", name="KB")
     document = Document.objects.create(
         kb=kb,
+        access_policy=kb.access_policy,
         filename="guide.md",
         file=SimpleUploadedFile("guide.md", b"# guide"),
         file_type="md",

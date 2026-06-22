@@ -52,8 +52,109 @@ def build_eval_param_signature(eval_settings):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
+CLASSIFICATION_CHOICES = [
+    ("public", "Public"), ("internal", "Internal"),
+    ("confidential", "Confidential"), ("restricted", "Restricted"),
+]
+CLASSIFICATION_RANK = {value: index for index, (value, _) in enumerate(CLASSIFICATION_CHOICES)}
+ROLE_CAPABILITIES = [
+    "manage_organization", "manage_members", "manage_roles", "manage_knowledge_bases",
+    "manage_documents", "manage_policies", "query", "view_traces", "run_evaluations", "use_agent",
+]
+
+
+class Organization(models.Model):
+    name = models.CharField(max_length=160)
+    slug = models.SlugField(max_length=180, unique=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_organizations")
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    class Meta:
+        ordering = ["name", "id"]
+    def __str__(self):
+        return self.name
+
+
+class Role(models.Model):
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name="roles")
+    name = models.CharField(max_length=100)
+    slug = models.SlugField(max_length=120)
+    capabilities = models.JSONField(default=list, blank=True)
+    is_system = models.BooleanField(default=False)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    class Meta:
+        ordering = ["organization_id", "name"]
+        constraints = [models.UniqueConstraint(fields=["organization", "slug"], name="unique_role_slug_per_org")]
+    def __str__(self):
+        return f"{self.organization_id}:{self.slug}"
+
+
+class Membership(models.Model):
+    STATUS_CHOICES = [("active", "Active"), ("suspended", "Suspended")]
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name="memberships")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="organization_memberships")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    department = models.CharField(max_length=120, blank=True, default="")
+    clearance = models.CharField(max_length=20, choices=CLASSIFICATION_CHOICES, default="internal")
+    roles = models.ManyToManyField(Role, related_name="memberships", blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    class Meta:
+        ordering = ["organization_id", "user_id"]
+        constraints = [models.UniqueConstraint(fields=["organization", "user"], name="unique_membership_per_org_user")]
+    def __str__(self):
+        return f"{self.organization_id}:{self.user_id}"
+
+
+class AccessPolicy(models.Model):
+    VISIBILITY_CHOICES = [("organization", "Organization"), ("restricted", "Restricted")]
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name="access_policies")
+    name = models.CharField(max_length=160)
+    classification = models.CharField(max_length=20, choices=CLASSIFICATION_CHOICES, default="internal")
+    visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default="organization")
+    allowed_roles = models.ManyToManyField(Role, related_name="access_policies", blank=True)
+    allowed_users = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name="allowed_access_policies", blank=True)
+    denied_users = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name="denied_access_policies", blank=True)
+    allowed_departments = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_access_policies")
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    class Meta:
+        ordering = ["organization_id", "name", "id"]
+        constraints = [models.UniqueConstraint(fields=["organization", "name"], name="unique_policy_name_per_org")]
+    def __str__(self):
+        return f"{self.organization_id}:{self.name}"
+
+
+class AuthorizationAuditLog(models.Model):
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name="authorization_audit_logs")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="authorization_audit_logs")
+    membership = models.ForeignKey(Membership, null=True, blank=True, on_delete=models.SET_NULL, related_name="authorization_audit_logs")
+    action = models.CharField(max_length=80)
+    resource_type = models.CharField(max_length=80, blank=True, default="")
+    resource_id = models.CharField(max_length=120, blank=True, default="")
+    allowed = models.BooleanField(default=False)
+    reason = models.CharField(max_length=240, blank=True, default="")
+    scope_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["organization", "created_at"]),
+            models.Index(fields=["actor", "allowed", "created_at"]),
+        ]
+
+
 class KnowledgeBase(models.Model):
+    VISIBILITY_CHOICES = [("private", "Private"), ("organization", "Organization"), ("restricted", "Restricted")]
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    organization = models.ForeignKey(Organization, null=True, blank=True, on_delete=models.CASCADE, related_name="knowledge_bases")
+    access_policy = models.ForeignKey(AccessPolicy, null=True, blank=True, on_delete=models.PROTECT, related_name="knowledge_bases")
+    visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default="private")
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True, default="")
     active_config_version = models.ForeignKey(
@@ -79,6 +180,8 @@ class Document(models.Model):
     ]
 
     kb = models.ForeignKey(KnowledgeBase, on_delete=models.CASCADE, related_name="documents")
+    access_policy = models.ForeignKey(AccessPolicy, null=True, blank=True, on_delete=models.PROTECT, related_name="documents")
+    inherits_policy = models.BooleanField(default=True)
     filename = models.CharField(max_length=255)
     file = models.FileField(upload_to="documents/%Y/%m/%d/")
     file_type = models.CharField(max_length=50, blank=True, default="")
@@ -182,6 +285,8 @@ class DocumentPage(models.Model):
 class Chunk(models.Model):
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="chunks")
     kb = models.ForeignKey(KnowledgeBase, on_delete=models.CASCADE, related_name="chunks")
+    access_policy = models.ForeignKey(AccessPolicy, null=True, blank=True, on_delete=models.PROTECT, related_name="chunks")
+    inherits_policy = models.BooleanField(default=True)
     parse_run = models.ForeignKey(
         DocumentParseRun, null=True, blank=True, on_delete=models.SET_NULL, related_name="chunks"
     )
@@ -211,6 +316,9 @@ class ChatMessage(models.Model):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     content = models.TextField()
     sources = models.JSONField(default=list, blank=True)
+    source_chunk_ids = models.JSONField(default=list, blank=True)
+    source_policy_ids = models.JSONField(default=list, blank=True)
+    authorization_snapshot = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -296,6 +404,11 @@ class RagUserFeedback(models.Model):
 
 class RagTrace(models.Model):
     session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="traces")
+    organization = models.ForeignKey(Organization, null=True, blank=True, on_delete=models.SET_NULL, related_name="rag_traces")
+    access_scope_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    access_policy_ids = models.JSONField(default=list, blank=True)
+    authorization_decision = models.JSONField(default=dict, blank=True)
+    redaction_metadata = models.JSONField(default=dict, blank=True)
     message = models.OneToOneField(ChatMessage, null=True, blank=True, on_delete=models.SET_NULL, related_name="trace")
     question = models.TextField()
     rewritten_query = models.TextField(blank=True, default="")
@@ -325,6 +438,7 @@ class RagBenchmarkCase(models.Model):
         ("regression", "Regression"),
         ("smoke", "Smoke"),
         ("release_gate", "Release Gate"),
+        ("security_acl", "Security ACL"),
     ]
     DIFFICULTY_CHOICES = [
         ("easy", "Easy"),
@@ -336,6 +450,7 @@ class RagBenchmarkCase(models.Model):
         ("benchmark", "Benchmark"),
         ("regression", "Regression"),
         ("release", "Release"),
+        ("security", "Security"),
     ]
     SOURCE_CHOICES = [
         ("expert", "Expert"),
@@ -346,6 +461,10 @@ class RagBenchmarkCase(models.Model):
     ]
 
     kb = models.ForeignKey(KnowledgeBase, on_delete=models.CASCADE, related_name="benchmark_cases")
+    principal_membership = models.ForeignKey(Membership, null=True, blank=True, on_delete=models.SET_NULL, related_name="security_benchmark_cases")
+    forbidden_document_ids = models.JSONField(default=list, blank=True)
+    forbidden_chunk_ids = models.JSONField(default=list, blank=True)
+    expected_authorized_document_ids = models.JSONField(default=list, blank=True)
     case_id = models.CharField(max_length=120)
     case_type = models.CharField(max_length=40, choices=CASE_TYPE_CHOICES, default="expert")
     question = models.TextField()

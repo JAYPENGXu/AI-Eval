@@ -44,6 +44,7 @@
                 <el-option label="回归用例" value="regression" />
                 <el-option label="冒烟用例" value="smoke" />
                 <el-option label="发布门禁" value="release_gate" />
+                <el-option label="权限安全" value="security_acl" />
               </el-select>
             </el-form-item>
             <el-form-item class="field-block">
@@ -84,6 +85,20 @@
               <span class="field-label-with-tip"><span>标签</span></span>
               <el-input v-model="benchmarkForm.tagsText" placeholder="多个标签用逗号分隔" />
             </el-form-item>
+          </section>
+
+          <section v-if="benchmarkForm.suite === 'security'" class="form-section form-section-required">
+            <header class="form-section-head"><h3>权限安全边界</h3></header>
+            <el-form-item class="field-block">
+              <span class="field-label-with-tip"><span>受控 Principal</span><span class="field-required">必填</span></span>
+              <el-select v-model="benchmarkForm.principalMembership" filterable style="width:100%" placeholder="选择执行检索的成员身份">
+                <el-option v-for="principal in securityPrincipals" :key="principal.id" :label="`${principal.user_name} · ${principal.department || '-'} · ${principal.clearance} · ${principal.status}`" :value="principal.id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item class="field-block"><span class="field-label-with-tip"><span>禁止 Document ID</span></span><el-input v-model="benchmarkForm.forbiddenDocumentIdsText" placeholder="例如 12,15" /></el-form-item>
+            <el-form-item class="field-block"><span class="field-label-with-tip"><span>禁止 Chunk ID</span></span><el-input v-model="benchmarkForm.forbiddenChunkIdsText" placeholder="例如 101,102" /></el-form-item>
+            <el-form-item class="field-block"><span class="field-label-with-tip"><span>期望授权 Document ID</span></span><el-input v-model="benchmarkForm.expectedAuthorizedDocumentIdsText" placeholder="可选，用于正向范围核验" /></el-form-item>
+            <el-alert class="wide" type="warning" :closable="false" title="Security Suite 仅运行检索链，任一阶段召回禁止资源即失败，不会调用答案 LLM。" />
           </section>
 
           <section class="form-section">
@@ -275,6 +290,7 @@ defineProps({
   caseSources: { type: Array, default: () => [] },
   benchmarkForm: { type: Object, required: true },
   benchmarkCases: { type: Array, default: () => [] },
+  securityPrincipals: { type: Array, default: () => [] },
   parseCaseForm: { type: Object, required: true },
   parseCases: { type: Array, default: () => [] },
   busy: { type: Object, required: true },
@@ -296,6 +312,7 @@ const suiteLabels = {
   benchmark: '基准集',
   regression: '回归集',
   release: '发布集',
+  security: '安全集',
 }
 
 const sourceLabels = {

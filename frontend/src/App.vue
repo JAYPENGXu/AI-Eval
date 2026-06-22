@@ -4,12 +4,15 @@
     <el-container class="shell">
       <AppSidebar
         :username="user?.username"
+        :organizations="organizations"
+        :selected-organization="selectedOrganization"
         :kbs="kbs"
         :documents="filteredDocuments"
         :selected-kb="selectedKb"
         :selected-document="selectedDocument"
         :kb-form="kbForm"
         :busy="busy"
+        @select-organization="selectOrganization"
         @create-kb="createKb"
         @select-kb="selectKb"
         @select-document="selectDocument"
@@ -76,6 +79,15 @@
             />
 
 
+
+            <PermissionsPanel
+              :active="activeWorkbenchTab === 'permissions'"
+              :organization="selectedOrganization"
+              :selected-kb="selectedKb"
+              :selected-document="selectedDocument"
+              :chunks="chunks"
+              @create-organization="createOrganization"
+            />
 
             <AgentPanel
               v-model:collapse-value="activeCollapseSections.agent"
@@ -151,6 +163,7 @@
               :case-sources="caseSources"
               :benchmark-form="benchmarkForm"
               :benchmark-cases="benchmarkCases"
+              :security-principals="securityPrincipals"
               :parse-case-form="parseCaseForm"
               :parse-cases="parseCases"
               :busy="busy"
@@ -265,6 +278,7 @@ import CostsPanel from './components/Workbench/CostsPanel.vue'
 import DatasetsPanel from './components/Workbench/DatasetsPanel.vue'
 import EvaluationPanel from './components/Workbench/EvaluationPanel.vue'
 import HistoryPanel from './components/Workbench/HistoryPanel.vue'
+import PermissionsPanel from './components/Workbench/PermissionsPanel.vue'
 import WorkbenchTabs from './components/Workbench/WorkbenchTabs.vue'
 import RagDebugPanel from './components/Workbench/RagDebugPanel.vue'
 import {
@@ -288,7 +302,10 @@ import { useAgent } from './composables/useAgent'
 
 const authStore = useAuthStore()
 
+const allKbs = ref([])
 const kbs = ref([])
+const organizations = ref([])
+const selectedOrganization = ref(null)
 const documents = ref([])
 const chunkMethods = ref([])
 const selectedKb = ref(null)
@@ -304,6 +321,7 @@ const traceHistory = ref([])
 const selectedTraceIds = ref([])
 const traceSearch = ref('')
 const benchmarkCases = ref([])
+const securityPrincipals = ref([])
 const parseCases = ref([])
 const parseEvalRuns = ref([])
 const selectedParseEvalRun = ref(null)
@@ -361,6 +379,7 @@ const workbenchTabs = [
   { key: 'datasets', label: '评测集', caption: '基准与回归' },
   { key: 'history', label: '历史', caption: 'Trace 复盘' },
   { key: 'agent', label: 'Agent', caption: 'RAGOps 诊断' },
+  { key: 'permissions', label: '权限', caption: '组织与策略' },
   { key: 'costs', label: '成本', caption: '模型与 Token' },
 ]
 const evalSuites = [
@@ -368,6 +387,7 @@ const evalSuites = [
   { value: 'benchmark', label: '基准集' },
   { value: 'regression', label: '回归集' },
   { value: 'release', label: '发布集' },
+  { value: 'security', label: '安全集' },
 ]
 const caseSources = [
   { value: 'expert', label: '专家维护' },
@@ -438,6 +458,10 @@ const benchmarkForm = reactive({
   maxHallucinationRisk: 0.3,
   maxTotalTokens: 0,
   maxLatencyMs: 0,
+  principalMembership: null,
+  forbiddenDocumentIdsText: '',
+  forbiddenChunkIdsText: '',
+  expectedAuthorizedDocumentIdsText: '',
 })
 
 watch(activeWorkbenchTab, () => {
@@ -809,6 +833,10 @@ function parseLooseList(value) {
     .filter(Boolean)
 }
 
+function parseIdList(value) {
+  return parseLooseList(value).map(Number).filter((item) => Number.isInteger(item) && item > 0)
+}
+
 function parseJsonField(value, fallback = {}) {
   const raw = String(value || '').trim()
   if (!raw) return fallback
@@ -833,6 +861,7 @@ function buildDeterministicChecks() {
   if (compressionTerms.length) checks.compression_keep_terms = compressionTerms
   if (benchmarkForm.maxTotalTokens > 0) checks.max_total_tokens = benchmarkForm.maxTotalTokens
   if (benchmarkForm.maxLatencyMs > 0) checks.max_latency_ms = benchmarkForm.maxLatencyMs
+  if (benchmarkForm.suite === 'security') checks.unauthorized_recall_zero = true
   return checks
 }
 
@@ -878,6 +907,10 @@ function resetBenchmarkForm() {
   benchmarkForm.maxHallucinationRisk = 0.3
   benchmarkForm.maxTotalTokens = 0
   benchmarkForm.maxLatencyMs = 0
+  benchmarkForm.principalMembership = null
+  benchmarkForm.forbiddenDocumentIdsText = ''
+  benchmarkForm.forbiddenChunkIdsText = ''
+  benchmarkForm.expectedAuthorizedDocumentIdsText = ''
 }
 
 async function createBenchmarkCase() {
@@ -887,6 +920,10 @@ async function createBenchmarkCase() {
     ['question', '评测问题'],
     ['reference', '标准答案'],
   ].filter(([key]) => !String(benchmarkForm[key] || '').trim())
+  if (benchmarkForm.suite === 'security' && !benchmarkForm.principalMembership) {
+    actionError.value = '安全评测必须选择受控 Principal Membership。'
+    return
+  }
   if (missingFields.length) {
     actionError.value = `请先填写${missingFields.map(([, label]) => label).join('、')}。`
     notice.value = ''
@@ -913,6 +950,10 @@ async function createBenchmarkCase() {
       notes: benchmarkForm.notes,
       difficulty: benchmarkForm.difficulty,
       enabled: benchmarkForm.enabled,
+      principal_membership: benchmarkForm.suite === 'security' ? benchmarkForm.principalMembership : null,
+      forbidden_document_ids: parseIdList(benchmarkForm.forbiddenDocumentIdsText),
+      forbidden_chunk_ids: parseIdList(benchmarkForm.forbiddenChunkIdsText),
+      expected_authorized_document_ids: parseIdList(benchmarkForm.expectedAuthorizedDocumentIdsText),
     })
     benchmarkCases.value = [...benchmarkCases.value, created].sort((left, right) => left.case_id.localeCompare(right.case_id))
     resetBenchmarkForm()
@@ -1052,7 +1093,7 @@ async function resetWorkspace() {
 
   await runAction(async () => {
     busy.reset = true
-    const result = await api.resetWorkspace()
+    const result = await api.resetWorkspace(selectedOrganization.value?.id, selectedOrganization.value?.slug || '')
     kbs.value = []
     documents.value = []
     selectedKb.value = null
@@ -1075,7 +1116,12 @@ async function resetWorkspace() {
 }
 
 async function bootstrap() {
-  authStore.setUser(await api.me())
+  const currentUser = await api.me()
+  authStore.setUser(currentUser)
+  organizations.value = currentUser.organizations || await api.listOrganizations()
+  const savedOrganization = Number(localStorage.getItem('organizationId'))
+  selectedOrganization.value = organizations.value.find((item) => item.id === savedOrganization) || organizations.value[0] || null
+  securityPrincipals.value = selectedOrganization.value?.membership?.capabilities?.includes('run_evaluations') ? await api.listPrincipals(selectedOrganization.value.id) : []
   chunkMethods.value = await api.chunkMethods()
   await loadKbs()
   documents.value = await api.listDocuments()
@@ -1089,14 +1135,31 @@ async function bootstrap() {
   await loadChatSessions({ restore: true })
 }
 
+async function createOrganization(name) {
+  if (!String(name || '').trim()) return
+  const organization = await api.createOrganization({ name: String(name).trim() })
+  organizations.value.push(organization)
+  await selectOrganization(organization)
+}
+
 async function loadKbs() {
-  kbs.value = await api.listKbs()
-  if (!selectedKb.value && kbs.value.length) selectedKb.value = kbs.value[0]
+  allKbs.value = await api.listKbs()
+  kbs.value = selectedOrganization.value ? allKbs.value.filter((item) => item.organization === selectedOrganization.value.id) : []
+  if (!kbs.value.some((item) => item.id === selectedKb.value?.id)) selectedKb.value = kbs.value[0] || null
+}
+
+async function selectOrganization(organization) {
+  selectedOrganization.value = organization
+  localStorage.setItem('organizationId', String(organization.id))
+  await loadKbs()
+  securityPrincipals.value = selectedOrganization.value?.membership?.capabilities?.includes('run_evaluations') ? await api.listPrincipals(selectedOrganization.value.id) : []
+  if (selectedKb.value) selectKb(selectedKb.value)
 }
 
 async function createKb() {
   await runAction(async () => {
-    const kb = await api.createKb(kbForm)
+    const kb = await api.createKb({ ...kbForm, organization: selectedOrganization.value?.id })
+    allKbs.value.unshift(kb)
     kbs.value.unshift(kb)
     selectedKb.value = kb
     notice.value = `已创建知识库：${kb.name}`
