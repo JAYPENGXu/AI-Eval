@@ -45,6 +45,7 @@
         :key="doc.id"
         class="list-item"
         :class="{ active: selectedDocument?.id === doc.id }"
+        :title="doc.filename"
         @click="$emit('select-document', doc)"
       >
         <strong>{{ doc.filename }}</strong>

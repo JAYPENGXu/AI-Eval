@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .permission_views import AccessPolicyViewSet, AuthorizationAuditLogViewSet, ChunkAccessViewSet, OrganizationViewSet
+from .demo import persona_login, personas
 from .views import (
     ChatSessionViewSet,
     DocumentViewSet,
@@ -53,6 +54,8 @@ urlpatterns = [
     path("health/ready/", health_ready),
     path("system-health/", system_health),
     path("auth/register/", RegisterView.as_view()),
+    path("demo/personas/", personas),
+    path("demo/persona-login/", persona_login),
     path("auth/me/", me),
     path("chunk-methods/", chunk_methods),
     path("model-usage/summary/", model_usage_summary),

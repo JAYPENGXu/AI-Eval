@@ -12,7 +12,7 @@ from django.http import StreamingHttpResponse
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import generics, status, viewsets
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
@@ -26,6 +26,8 @@ from .eval_runs import reconcile_stale_eval_run, reconcile_stale_eval_runs
 from .experiments import refresh_experiment_plan, start_experiment_plan
 from .chunkers import list_chunk_methods
 from .document_parsing.service import create_parse_run
+from .demo_protection import deny_demo_core_mutation, deny_seed_document_delete, deny_seed_document_mutation
+from .throttles import DemoExpensiveThrottle
 from .indexing import ParseRunNotReadyError
 from .index_lifecycle import create_index_run, index_health
 from .health import health_report
@@ -199,6 +201,7 @@ def model_usage_summary(request):
 
 
 @api_view(["POST"])
+@throttle_classes([DemoExpensiveThrottle])
 @permission_classes([IsAuthenticated])
 def ragops_agent_run(request):
     message = (request.data.get("message") or "").strip()
@@ -293,6 +296,11 @@ class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
 
+    def create(self, request, *args, **kwargs):
+        if settings.DEMO_MODE and not settings.DEMO_ALLOW_REGISTRATION:
+            return Response({"detail": "Public registration is disabled in demo mode."}, status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -317,6 +325,7 @@ def reset_workspace(request):
     if not membership:
         return Response({"detail": "Organization not found."}, status=status.HTTP_404_NOT_FOUND)
     organization = membership.organization
+    deny_demo_core_mutation(organization)
     is_owner = membership.roles.filter(slug="owner").exists()
     is_shared = organization.memberships.filter(status="active").count() > 1
     if not is_owner:
@@ -422,6 +431,7 @@ class KnowledgeBaseViewSet(viewsets.ModelViewSet):
         audit_access(scope, "manage_knowledge_bases", kb, True, "updated")
 
     def perform_destroy(self, instance):
+        deny_demo_core_mutation(instance.organization, "预置演示知识库不可删除；可以创建和删除自己的临时知识库。")
         scope = require_capability(self.request.user, "manage_knowledge_bases", kb=instance)
         audit_access(scope, "manage_knowledge_bases", instance, True, "deleted")
         instance.delete()
@@ -435,6 +445,7 @@ class KnowledgeBaseViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="reindex-stale")
     def reindex_stale(self, request, pk=None):
+        deny_demo_core_mutation(self.get_object().organization, "预置演示知识库不可批量重建；请上传临时文档体验索引。")
         kb = self.get_object(); runs = []
         scope = require_capability(request.user, "manage_documents", kb=kb)
         for document in scope.filter_documents(kb.documents.all(), capability="manage_documents"):
@@ -474,6 +485,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         document = serializer.instance
+        deny_seed_document_mutation(document)
         scope = require_capability(self.request.user, "manage_documents", kb=document.kb)
         if "kb" in serializer.validated_data and serializer.validated_data["kb"].id != document.kb_id:
             raise PermissionDenied("Moving a document between knowledge bases is not supported.")
@@ -484,6 +496,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         audit_access(scope, "manage_documents", document, True, "updated")
 
     def perform_destroy(self, instance):
+        deny_seed_document_delete(instance)
         scope = require_capability(self.request.user, "manage_documents", kb=instance.kb)
         audit_access(scope, "manage_documents", instance, True, "deleted")
         instance.delete()
@@ -491,6 +504,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="set-access-policy")
     def set_access_policy(self, request, pk=None):
         document = self.get_object()
+        deny_seed_document_mutation(document)
         scope = require_capability(request.user, "manage_documents", kb=document.kb)
         policy = document.kb.organization.access_policies.filter(pk=request.data.get("access_policy"), is_active=True).first()
         if not policy:
@@ -510,6 +524,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="parse")
     def parse_document(self, request, pk=None):
         document = self.get_object()
+        deny_seed_document_mutation(document)
         require_capability(request.user, "manage_documents", kb=document.kb)
         run = create_parse_run(document)
         run.refresh_from_db()
@@ -551,6 +566,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="accept-parse")
     def accept_parse(self, request, pk=None):
         document = self.get_object()
+        deny_seed_document_mutation(document)
         require_capability(request.user, "manage_documents", kb=document.kb)
         run_id = request.data.get("parse_run_id")
         runs = document.parse_runs.filter(status="needs_review")
@@ -585,6 +601,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def index(self, request, pk=None):
         document = self.get_object()
+        deny_seed_document_mutation(document)
         require_capability(request.user, "manage_documents", kb=document.kb)
         try:
             run = create_index_run(
@@ -640,7 +657,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         session.save(update_fields=["updated_at"])
         return Response(ChatMessageSerializer(answer, context={"request": request}).data)
 
-    @action(detail=True, methods=["post"], url_path="stream")
+    @action(detail=True, methods=["post"], url_path="stream", throttle_classes=[DemoExpensiveThrottle])
     def stream(self, request, pk=None):
         session = self.get_object()
         question = (request.data.get("content") or "").strip()
@@ -1105,7 +1122,7 @@ class RagEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
 
-    @action(detail=False, methods=["post"], url_path="run")
+    @action(detail=False, methods=["post"], url_path="run", throttle_classes=[DemoExpensiveThrottle])
     def run(self, request):
         kb_id = request.data.get("kb") or request.data.get("kb_id")
         if not kb_id:
@@ -1207,7 +1224,7 @@ class DocumentParseEvalRunViewSet(viewsets.ReadOnlyModelViewSet):
         if suite: queryset = queryset.filter(suite=suite)
         return queryset
 
-    @action(detail=False, methods=["post"], url_path="run")
+    @action(detail=False, methods=["post"], url_path="run", throttle_classes=[DemoExpensiveThrottle])
     def run(self, request):
         suite = request.data.get("suite") or "benchmark"
         allowed = {choice[0] for choice in RagBenchmarkCase.SUITE_CHOICES}

@@ -66,6 +66,8 @@ ROLE_CAPABILITIES = [
 class Organization(models.Model):
     name = models.CharField(max_length=160)
     slug = models.SlugField(max_length=180, unique=True)
+    is_demo = models.BooleanField(default=False, db_index=True)
+    demo_seed_version = models.CharField(max_length=40, blank=True, default="")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_organizations")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)

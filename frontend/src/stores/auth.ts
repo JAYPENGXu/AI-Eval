@@ -12,6 +12,8 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
 
   function setTokens(tokens: { access: string; refresh: string }) {
+    // Prevent responses authorized as the previous identity from updating the new session.
+    abortActiveRequests()
     access.value = tokens.access
     refresh.value = tokens.refresh
     localStorage.setItem('access', tokens.access)

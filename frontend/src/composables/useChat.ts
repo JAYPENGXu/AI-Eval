@@ -65,6 +65,9 @@ export function useChat({
     chatSessions.value = []
     question.value = ''
     loading.value = false
+    for (const key of Object.keys(highlightedSourceRefs)) delete highlightedSourceRefs[key]
+    for (const key of Object.keys(openSourcePanels)) delete openSourcePanels[key]
+    for (const key of Object.keys(feedbackDrafts)) delete feedbackDrafts[key]
   }
 
   function messageSourceKey(message: ChatMessage): string {
@@ -176,20 +179,31 @@ export function useChat({
 
   async function loadChatSessions({ restore = false }: { restore?: boolean } = {}) {
     if (!selectedKb.value) {
-      chatSessions.value = []
+      resetChatState()
       return
     }
-    chatSessions.value = await api.listSessions({ kb: selectedKb.value.id })
+    const requestedKbId = selectedKb.value.id
+    const loadedSessions = await api.listSessions({ kb: requestedKbId })
+    if (selectedKb.value?.id !== requestedKbId) return
+    chatSessions.value = loadedSessions
     const currentSessionId = session.value?.id
     if (currentSessionId) {
       const refreshedCurrent = chatSessions.value.find((item) => item.id === currentSessionId)
-      if (refreshedCurrent) session.value = refreshedCurrent
+      if (refreshedCurrent) {
+        session.value = refreshedCurrent
+      } else {
+        session.value = null
+        messages.value = []
+      }
     }
     if (!restore) return
     const savedId = Number(localStorage.getItem(lastSessionStorageKey()) || 0)
     const target = chatSessions.value.find((item) => item.id === savedId) || chatSessions.value[0]
     if (target) {
       await selectChatSession(target, { remember: false })
+    } else {
+      session.value = null
+      messages.value = []
     }
   }
 

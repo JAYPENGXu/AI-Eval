@@ -19,6 +19,8 @@ jobs:
       CHAT_MODEL: test-model
       EMBEDDING_MODEL: test-embedding
       EMBEDDING_DIMENSIONS: '16'
+      DEMO_MODE: 'true'
+      DEMO_ALLOW_REGISTRATION: 'true'
       CELERY_BROKER_URL: redis://127.0.0.1:6379/0
       CELERY_RESULT_BACKEND: redis://127.0.0.1:6379/1
       SQLITE_DB_PATH: /tmp/aia-e2e.sqlite3
@@ -37,6 +39,7 @@ jobs:
         working-directory: backend
         run: |
           python manage.py migrate
+          python manage.py seed_demo_workspace --no-process
           nohup celery -A assistant_backend worker -Q documents,evaluations,summaries,orchestration --concurrency=1 --loglevel=INFO > /tmp/celery.log 2>&1 &
           nohup python manage.py runserver 127.0.0.1:8010 > /tmp/django.log 2>&1 &
       - name: Install frontend and browser

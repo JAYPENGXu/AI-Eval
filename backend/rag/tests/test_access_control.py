@@ -80,6 +80,29 @@ class AuthorizationApiTests(AccessFixture):
         self.assertEqual(data["sources"], [])
 
 
+    def test_chat_sessions_are_isolated_between_members_of_the_same_organization(self):
+        supplier_membership = Membership.objects.create(
+            organization=self.org,
+            user=self.outsider,
+            status="active",
+            department="supplier",
+            clearance="internal",
+        )
+        supplier_membership.roles.add(self.roles["member"])
+        session = ChatSession.objects.create(owner=self.employee, kb=self.kb, title="研发内部会话")
+        ChatMessage.objects.create(session=session, role="user", content="研发版本计划是什么？")
+        ChatMessage.objects.create(session=session, role="assistant", content="仅研发可见的回答")
+
+        client = APIClient()
+        client.force_authenticate(self.outsider)
+        listed_ids = {item["id"] for item in client.get(f"/api/chat-sessions/?kb={self.kb.id}").json()}
+
+        self.assertNotIn(session.id, listed_ids)
+        self.assertEqual(client.get(f"/api/chat-sessions/{session.id}/").status_code, 404)
+        self.assertEqual(client.get(f"/api/chat-sessions/{session.id}/messages/").status_code, 404)
+        self.assertEqual(client.delete(f"/api/chat-sessions/{session.id}/").status_code, 404)
+
+
 class SecurityEvaluationTests(AccessFixture):
     @patch("rag.security_evaluation.compress_context")
     @patch("rag.security_evaluation.rerank_candidates")

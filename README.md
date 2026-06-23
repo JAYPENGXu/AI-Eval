@@ -276,6 +276,19 @@ backend/agent_state/langgraph_checkpoints.sqlite3
 
 它只保存 Agent 执行状态，不保存业务主事实，不提交 Git。
 
+## 十分钟全链路 Demo
+
+项目内置两个虚构租户、六个可登录 Persona、七份固定 PDF、专家评测集、失败 Trace、参数实验 Winner、Release Gate，以及相互独立的 HITL 发布/回滚卡片。固定 PDF 位于 `backend/rag/demo_assets/`；Seed 只复用版本化资产，不会在每次重置时重新生成 PDF。
+
+```bash
+cd backend
+source venv/bin/activate
+python manage.py migrate
+python manage.py seed_demo_workspace --reset
+```
+
+正式 Seed 会真实执行解析、扫描页 PaddleOCR、切片、Embedding 和 Milvus 索引，外部依赖失败时明确失败，不提供假数据降级。CI 可使用 `--no-process` 只验证 UI、权限、评测与 Agent 场景。完整 Persona、演示脚本、公共环境保护和验收清单见 [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md)。
+
 ## 环境变量
 
 后端读取 `backend/.env`。常见配置：
@@ -299,6 +312,10 @@ EVAL_RUN_STALE_TIMEOUT_SECONDS=3600
 PADDLEOCR_JOB_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
 PADDLEOCR_TOKEN=...
 PADDLEOCR_MODEL=PaddleOCR-VL-1.6
+PADDLEOCR_RESULT_HOST_ALLOWLIST=.bcebos.com,.baidubce.com,.aistudio-app.com
+DEMO_MODE=false
+DEMO_ALLOW_REGISTRATION=false
+DEMO_RESET_INTERVAL_MINUTES=60
 CELERY_BROKER_URL=redis://127.0.0.1:6379/0
 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/1
 LANGGRAPH_CHECKPOINT_DB=...
@@ -324,6 +341,9 @@ python manage.py runserver 127.0.0.1:8010
 
 # 终端 3：确保 Redis 已启动后运行统一 Worker
 celery -A assistant_backend worker --loglevel=INFO --concurrency=1 --queues=documents,evaluations,summaries,orchestration
+
+# 终端 4：公共 Demo 启用时运行周期清理调度器
+celery -A assistant_backend beat --loglevel=INFO --pidfile=/tmp/celerybeat.pid
 ```
 
 

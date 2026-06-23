@@ -86,3 +86,11 @@ def parse_eval_run_task(self, run_id):
     from .parse_evaluation import execute_parse_eval_run
     DocumentParseEvalRun.objects.filter(id=run_id,status="queued").update(celery_task_id=str(self.request.id or ""))
     execute_parse_eval_run(run_id)
+@shared_task(name="rag.reset_demo_runtime")
+def reset_demo_runtime_task():
+    from django.conf import settings
+    from .demo_reset import reset_demo_runtime
+
+    if not settings.DEMO_MODE:
+        return {"skipped": True, "reason": "demo_mode_disabled"}
+    return reset_demo_runtime()

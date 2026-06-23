@@ -1115,7 +1115,43 @@ async function resetWorkspace() {
   busy.reset = false
 }
 
+function resetIdentityBoundState() {
+  parsePollGeneration += 1
+  allKbs.value = []
+  kbs.value = []
+  organizations.value = []
+  selectedOrganization.value = null
+  documents.value = []
+  chunkMethods.value = []
+  selectedKb.value = null
+  selectedDocument.value = null
+  chunks.value = []
+  parsePreview.value = null
+  Object.keys(stats).forEach((key) => delete stats[key])
+  notice.value = ''
+  actionError.value = ''
+  resetChatState()
+  latestTrace.value = null
+  traceHistory.value = []
+  selectedTraceIds.value = []
+  traceSearch.value = ''
+  resetEvalState()
+  benchmarkCases.value = []
+  securityPrincipals.value = []
+  parseCases.value = []
+  parseEvalRuns.value = []
+  selectedParseEvalRun.value = null
+  configVersions.value = []
+  configDeployments.value = []
+  modelUsage.value = null
+  resetAgentState()
+  Object.keys(busy).forEach((key) => {
+    busy[key] = typeof busy[key] === 'boolean' ? false : ''
+  })
+}
+
 async function bootstrap() {
+  resetIdentityBoundState()
   const currentUser = await api.me()
   authStore.setUser(currentUser)
   organizations.value = currentUser.organizations || await api.listOrganizations()

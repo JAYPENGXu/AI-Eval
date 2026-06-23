@@ -13,6 +13,8 @@ export interface Organization {
   id: number
   name: string
   slug: string
+  is_demo?: boolean
+  demo_seed_version?: string
   membership?: OrganizationMembershipSummary
 }
 
@@ -30,6 +32,18 @@ export interface AuthorizationAuditLog { id: number; organization: number; actor
 export interface AuthTokens {
   access: string
   refresh: string
+}
+
+export interface DemoPersona {
+  username: string
+  label: string
+  description: string
+  organization: string
+}
+
+export interface DemoPersonasResponse {
+  personas: DemoPersona[]
+  seed_version: string
 }
 
 export interface KnowledgeBase {

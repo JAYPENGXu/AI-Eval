@@ -36,7 +36,7 @@ def env_json(name: str, default):
         return default
 
 
-SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-aiassistant-dev")
+SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-aiassistant-dev-key")
 DEBUG = env_bool("DEBUG", True)
 ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", ["127.0.0.1", "localhost"])
 
@@ -112,7 +112,21 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rag.throttles.DemoUserThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "demo_user": os.getenv("DEMO_USER_RATE", "240/min"),
+        "demo_expensive": os.getenv("DEMO_EXPENSIVE_RATE", "20/min"),
+        "demo_login": os.getenv("DEMO_LOGIN_RATE", "30/min"),
+    },
 }
+
+DEMO_MODE = env_bool("DEMO_MODE", False)
+DEMO_ALLOW_REGISTRATION = env_bool("DEMO_ALLOW_REGISTRATION", not DEMO_MODE)
+DEMO_DEFAULT_PASSWORD = os.getenv("DEMO_DEFAULT_PASSWORD", "RagPilot-Demo-2026")
+DEMO_SEED_VERSION = os.getenv("DEMO_SEED_VERSION", "2026.06.1")
+DEMO_RESET_INTERVAL_MINUTES = int(os.getenv("DEMO_RESET_INTERVAL_MINUTES", "60"))
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),
@@ -191,6 +205,10 @@ PADDLEOCR_CONNECT_TIMEOUT = float(os.getenv("PADDLEOCR_CONNECT_TIMEOUT", "10"))
 PADDLEOCR_READ_TIMEOUT = float(os.getenv("PADDLEOCR_READ_TIMEOUT", "60"))
 PADDLEOCR_HTTP_RETRIES = int(os.getenv("PADDLEOCR_HTTP_RETRIES", "3"))
 PADDLEOCR_MAX_RESULT_BYTES = int(os.getenv("PADDLEOCR_MAX_RESULT_BYTES", str(100 * 1024 * 1024)))
+PADDLEOCR_RESULT_HOST_ALLOWLIST = env_list(
+    "PADDLEOCR_RESULT_HOST_ALLOWLIST",
+    [".bcebos.com", ".baidubce.com", ".aistudio-app.com"],
+)
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://127.0.0.1:6379/1")
@@ -210,7 +228,15 @@ CELERY_TASK_ROUTES = {
     "rag.parse_eval": {"queue": "evaluations"},
     "rag.session_summary": {"queue": "summaries"},
     "rag.finalize_experiment": {"queue": "orchestration"},
+    "rag.reset_demo_runtime": {"queue": "orchestration"},
 }
+CELERY_BEAT_SCHEDULE = {
+    "reset-public-demo-runtime": {
+        "task": "rag.reset_demo_runtime",
+        "schedule": max(DEMO_RESET_INTERVAL_MINUTES, 5) * 60,
+    }
+} if DEMO_MODE else {}
+
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_TASK_ACKS_LATE = True
 

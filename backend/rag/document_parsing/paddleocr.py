@@ -107,8 +107,23 @@ class PaddleOcrClient:
         parsed = urlparse(url)
         if parsed.scheme != "https" or not parsed.hostname:
             raise PaddleOcrError("PaddleOCR 结果 URL 必须是有效 HTTPS 地址。")
+        hostname = parsed.hostname.lower()
         try:
-            addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+            literal_ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            literal_ip = None
+        if literal_ip is not None:
+            if literal_ip.is_private or literal_ip.is_loopback or literal_ip.is_link_local or literal_ip.is_reserved or literal_ip.is_multicast:
+                raise PaddleOcrError("PaddleOCR 结果地址指向非公网网络，已拒绝下载。")
+            return
+        trusted = any(
+            hostname == suffix.lstrip(".") or hostname.endswith(suffix)
+            for suffix in settings.PADDLEOCR_RESULT_HOST_ALLOWLIST
+        )
+        if trusted:
+            return
+        try:
+            addresses = socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)
         except socket.gaierror as exc:
             raise PaddleOcrError("无法解析 PaddleOCR 结果地址。") from exc
         for address in addresses:

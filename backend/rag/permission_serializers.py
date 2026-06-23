@@ -69,8 +69,8 @@ class OrganizationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Organization
-        fields = ["id", "name", "slug", "membership", "created_at", "updated_at"]
-        read_only_fields = ["slug"]
+        fields = ["id", "name", "slug", "is_demo", "demo_seed_version", "membership", "created_at", "updated_at"]
+        read_only_fields = ["slug", "is_demo", "demo_seed_version"]
 
     def get_membership(self, obj):
         request = self.context.get("request")

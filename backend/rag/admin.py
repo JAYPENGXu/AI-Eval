@@ -63,7 +63,7 @@ admin.site.register(RagConfigDeployment)
 
 @admin.register(Organization)
 class OrganizationAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "slug", "created_by", "created_at")
+    list_display = ("id", "name", "slug", "is_demo", "demo_seed_version", "created_by", "created_at")
     search_fields = ("name", "slug")
 
 @admin.register(Membership)

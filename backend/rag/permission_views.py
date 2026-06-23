@@ -4,6 +4,7 @@ from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.response import Response
 
 from .access_control import audit_access, build_access_scope, require_capability
+from .demo_protection import DEMO_POLICIES, demo_protected, deny_demo_core_mutation
 from .models import AccessPolicy, AuthorizationAuditLog, Chunk, Membership, Organization, Role
 from .permission_serializers import AccessPolicySerializer, AuthorizationAuditLogSerializer, MembershipSerializer, OrganizationSerializer, RoleSerializer
 
@@ -24,6 +25,7 @@ class OrganizationViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         organization, scope = self._scope("manage_organization")
+        deny_demo_core_mutation(organization)
         serializer.save()
         audit_access(scope, "manage_organization", organization, True, "updated")
 
@@ -64,6 +66,8 @@ class OrganizationViewSet(viewsets.ModelViewSet):
         item = organization.memberships.filter(pk=membership_id).first()
         if not item:
             raise NotFound()
+        if demo_protected(organization) and item.user.username.startswith("demo_"):
+            raise PermissionDenied("预置演示成员不可修改或删除。")
         if request.method == "DELETE":
             if item.roles.filter(slug="owner").exists() and organization.memberships.filter(status="active", roles__slug="owner").count() <= 1:
                 raise PermissionDenied("The last active owner cannot be removed.")
@@ -97,6 +101,8 @@ class OrganizationViewSet(viewsets.ModelViewSet):
         organization, scope = self._scope("manage_roles")
         role = organization.roles.filter(pk=role_id).first()
         if not role: raise NotFound()
+        if demo_protected(organization) and (role.is_system or role.slug == "hr_specialist"):
+            raise PermissionDenied("预置演示角色不可修改或删除。")
         if request.method == "DELETE":
             if role.is_system: raise PermissionDenied("System roles cannot be deleted.")
             role.delete(); audit_access(scope, "manage_roles", role, True, "deleted")
@@ -130,10 +136,14 @@ class AccessPolicyViewSet(viewsets.ModelViewSet):
         policy = serializer.save(created_by=self.request.user)
         audit_access(scope, "manage_policies", policy, True, "created")
     def perform_update(self, serializer):
+        if demo_protected(serializer.instance.organization) and serializer.instance.name in DEMO_POLICIES:
+            raise PermissionDenied("预置演示策略不可修改；可以创建自己的临时策略。")
         scope = self._scope(serializer.instance.organization)
         policy = serializer.save()
         audit_access(scope, "manage_policies", policy, True, "updated")
     def perform_destroy(self, instance):
+        if demo_protected(instance.organization) and instance.name in DEMO_POLICIES:
+            raise PermissionDenied("预置演示策略不可删除。")
         scope = self._scope(instance.organization)
         if instance.knowledge_bases.exists() or instance.documents.exists() or instance.chunks.exists():
             raise PermissionDenied("Policy is in use and cannot be deleted.")
