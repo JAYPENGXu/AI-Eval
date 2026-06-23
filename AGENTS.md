@@ -247,6 +247,25 @@ Do not block SSE responses while updating `ChatSessionSummary`. The summary job 
 
 Trace settings should keep memory observability fields such as `session_summary_used`, `session_summary_chars`, and `session_summary_message_count`.
 
+### Identity And Chat Session Isolation
+
+`ChatSession` and every nested `ChatMessage` are private to `ChatSession.owner`. Organization membership, Owner/Admin content-read bypass, shared KnowledgeBase access, or a higher clearance never grants access to another user conversation.
+
+Backend rules:
+
+- Chat session list/retrieve/update/delete QuerySets must filter by both `owner=request.user` and currently accessible KnowledgeBases.
+- Nested message and stream endpoints must resolve the parent through the authorized ChatSession ViewSet. Never query a client-provided session ID directly.
+- Cross-user session enumeration must return `404`, including users in the same Organization.
+- Historical answers and citations must still be re-authorized against the current AccessScope before serialization.
+
+Frontend rules:
+
+- `App.vue` persists while `AuthManager` changes identities, so hiding the authenticated slot is not sufficient isolation.
+- Before replacing tokens, abort every active request authorized as the previous identity.
+- During bootstrap, render only the identity-loading gate. Clear chat, Trace, evaluation, Agent, document, KnowledgeBase, organization, feedback-draft, and citation UI state before loading the new identity.
+- An empty authorized session list must explicitly clear the selected session and messages.
+- Browser storage may remember only a session ID; restore it only when that ID appears in the freshly authorized session list. Never persist message bodies or citations in browser storage.
+
 Retrieval query rewrite strategies:
 
 - `none`: use the original standalone question.
@@ -508,6 +527,7 @@ When changing a response shape, update backend serializer/view code and frontend
 - Update admin registration/list displays when a model becomes operationally important.
 - Keep evaluation fallback behavior: if no enabled database benchmark cases exist, the system may fall back to default JSON examples.
 - Keep SSE event format stable unless the frontend is updated at the same time.
+- When changing authentication, session history, or workspace bootstrap, update `test_access_control.py` and the Persona-switch Playwright test. Verify list isolation and direct old-ID access, not only hidden frontend controls.
 - Keep user-facing debug labels clear and concrete. This project is a learning system, so explainability matters.
 - Prefer Element Plus components and the existing component structure for frontend UI.
 - Do not reintroduce the old four-card Agent task UI unless explicitly requested; the current Agent product direction is a single end-to-end RAG repair workflow.

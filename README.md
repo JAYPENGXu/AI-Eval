@@ -112,6 +112,7 @@ AIAssistant/
 - Query Router：识别 `internal_knowledge` 和 `web_required`，需要联网/实时信息的问题不会硬查内部知识库。
 - 多轮对话：基于当前 ChatSession 最近几轮消息做 Conversational Query Rewrite，解决“他/这个/刚才那个”等指代问题。
 - 会话摘要记忆：长对话达到阈值后由 Celery 生成 Session Summary，后续问题改写会结合摘要和最近几轮消息。
+- 会话身份隔离：ChatSession/ChatMessage 仅会话创建者可见，切换 Persona 时会取消旧请求、清空全部身份相关内存状态，并在新身份 bootstrap 完成前阻止工作台渲染。
 - 混合检索：Vector Search + BM25 Search，通过 RRF 做 Hybrid Fusion。
 - Rerank：对 Hybrid 候选重新排序。
 - Context Compression：支持结构感知压缩、句子过滤、LLM 压缩等策略。
@@ -255,8 +256,8 @@ SQLite `db.sqlite3` 保存业务事实：
 - `DocumentParseRun`
 - `DocumentPage`
 - `Chunk`
-- `ChatSession`
-- `ChatMessage`
+- `ChatSession`：归属于单一 User；共享组织、共享知识库和 Owner/Admin 数据读取豁免均不会共享聊天会话。
+- `ChatMessage`：只能通过已鉴权的父 ChatSession 访问，历史引用返回时还会按当前 AccessScope 再次鉴权。
 - `ChatSessionSummary`
 - `RagTrace`
 - `RagBenchmarkCase`
@@ -521,6 +522,23 @@ python manage.py eval_ragas --suite regression
 5. API、ORM、Vector、BM25、Citation、Trace、Agent Tool 和评测执行时都会重新鉴权，客户端提交的角色和 Policy ID 不作为可信授权依据。
 
 `build_access_scope(user, kb)` 是唯一权限入口。Milvus 查询表达式同时包含 `organization_id` 与 `access_policy_id`，命中后再使用 ORM Scope 二次校验；SQLite Vector fallback 和 BM25 使用同一过滤后的 Chunk QuerySet。权限撤销后，历史 Assistant Message 不再返回旧答案和 Citation，Trace 只输出 ID、分数、位置、Hash 和脱敏摘要。
+
+### 会话与身份切换隔离
+
+知识库资源授权和聊天会话归属是两条独立边界：
+
+- KnowledgeBase/Document/Chunk 使用 Organization + Membership + AccessPolicy 决定“可以检索哪些资料”。
+- ChatSession/ChatMessage 始终使用 `owner=request.user` 决定“可以查看谁的对话”。即使 Owner/Admin 可以读取组织资料，也不能查看其他成员的私有会话。
+- 会话列表、详情、消息、流式回答和删除操作都先解析已授权的父 ChatSession；直接枚举其他用户的会话 ID 返回 `404`。
+- 前端切换账号时先进入“正在加载当前身份”门禁，取消旧身份尚未结束的请求，清空聊天、引用、反馈草稿、Trace、评测、Agent 和工作区状态，再加载新身份。
+- 本地存储只记录上次会话 ID，且只有该 ID 出现在新身份重新获取的授权会话列表中时才恢复；不缓存消息正文和 Citation。
+
+对应回归验证覆盖两个层次：
+
+```bash
+cd backend && ./venv/bin/python -m pytest rag/tests/test_access_control.py -q -s
+cd frontend && npm run e2e -- e2e/demo-personas.spec.ts --grep switching
+```
 
 权限工作台支持：
 

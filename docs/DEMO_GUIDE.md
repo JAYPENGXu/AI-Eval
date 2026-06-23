@@ -42,7 +42,7 @@ python manage.py seed_demo_workspace --reset --no-process
 2. **切片与索引**：查看 Chunk 的 `page_start/page_end/heading_path/block_ids`，再查看索引签名和过期检测。
 3. **召回、引用与 Trace**：询问“ORION 灾备演练的验证码是什么？”，检查混合召回、Rerank、Compression、页码引用及各阶段 Trace。
 4. **专家评测**：查看 smoke、benchmark、regression、release 与 security suite；打开固定 Baseline 的失败 Case，检查 deterministic checks 和 Judge JSON。
-5. **安全隔离**：切换研发员工、HR 和供应商 Persona，比较文档列表和召回结果。越权文档名称、正文、Citation 和历史答案均不可泄露。
+5. **安全隔离**：先以研发员工提问并保留会话，再退出并切换外部供应商，检查当前对话与历史会话中均不存在研发内容；同时比较研发、HR 和供应商的文档列表与召回结果。越权文档名称、正文、Citation、Trace、历史答案和其他用户会话均不可泄露。
 6. **Agent 实验**：打开固定实验计划，比较 Baseline 与两个 Variant，查看 Winner 依据和 Release Gate。
 7. **HITL 发布**：以组织负责人确认“发布通过 Release Gate 的 RAG 配置”，检查活跃版本和 Deployment 审计。
 8. **HITL 回滚**：对 v1 发起回滚并再次独立确认，检查活跃版本恢复和第二条审计记录。
@@ -52,6 +52,8 @@ python manage.py seed_demo_workspace --reset --no-process
 - Persona 登录不暴露密码，直接签发短期 JWT。
 - Demo 用户和高成本接口受 DRF 限流控制。
 - 预置 Organization、KB、Document、Role、Policy、Membership 和工作区重置接口禁止访客破坏。
+- Persona 切换会先取消上一身份的进行中请求并清空浏览器内存状态，新身份数据加载完成前不会渲染工作台。
+- 演示会话按 User 私有；共享 Organization/KnowledgeBase 只共享被授权的知识资源，不共享聊天历史。
 - 访客可以创建临时 KB、Policy、文档、评测和 Agent 运行，用于真实体验。
 - Celery Beat 周期执行 `rag.reset_demo_runtime`，清理访客数据并恢复待发布卡片，但保留已经完成的解析、OCR、Chunk 和向量索引。
 
